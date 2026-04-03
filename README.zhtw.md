@@ -78,16 +78,29 @@ Anthropic 提供了官方的 GitHub Actions 整合（[`anthropics/claude-code-ac
 
 ## 安裝
 
+### 快速安裝（不需要 Go）
+
+下載預建置的執行檔並自動設定：
+
+```bash
+cd /path/to/your-repo
+curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash
+```
+
+會下載適合您平台的最新 release 執行檔，安裝腳本到 `~/.claude-webhook/`，產生 `.env` 設定檔，並註冊目前的 repo。
+
+### 從原始碼安裝（需要 Go 1.23+）
+
 ```bash
 git clone https://github.com/htlin222/claude-with-webhook.git
 cd claude-with-webhook
 make install
 ```
 
-建置執行檔並安裝所有內容到 `~/.claude-webhook/`，包含：
+兩種方式都會安裝到 `~/.claude-webhook/`，包含：
 - 伺服器執行檔
-- 用於新增 repo 的 `register` 腳本
-- 啟動/停止腳本
+- `register` / `status` 腳本
+- `start` / `stop` 腳本
 - `.env` 設定檔（自動產生隨機 webhook 密鑰）
 
 ### 註冊 Repo

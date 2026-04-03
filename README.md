@@ -78,16 +78,29 @@ All processing happens on **your machine** using **your local `claude` CLI** —
 
 ## Install
 
+### Quick install (no Go required)
+
+Download a pre-built binary and set up everything automatically:
+
+```bash
+cd /path/to/your-repo
+curl -sL https://raw.githubusercontent.com/htlin222/claude-with-webhook/main/remote-install.sh | bash
+```
+
+This downloads the latest release binary for your platform, installs scripts to `~/.claude-webhook/`, generates a `.env` config, and registers the current repo.
+
+### From source (requires Go 1.23+)
+
 ```bash
 git clone https://github.com/htlin222/claude-with-webhook.git
 cd claude-with-webhook
 make install
 ```
 
-This builds the binary and installs everything to `~/.claude-webhook/`, including:
+Both methods install to `~/.claude-webhook/`, including:
 - The server binary
-- A `register` script for adding repos
-- Start/stop scripts
+- `register` / `status` scripts
+- `start` / `stop` scripts
 - A `.env` config file (auto-generated with a random webhook secret)
 
 ### Make commands

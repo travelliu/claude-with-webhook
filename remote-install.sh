@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # Remote installer: curl -sL <url>/remote-install.sh | bash
-# Run from any git repo root. Installs a centralized server at ~/.claude-webhook
-# and registers this repo for webhook automation.
+# Downloads pre-built binary from GitHub Releases (no Go required).
+# Run from any git repo root to install the server and register that repo.
 
-REPO_URL="https://raw.githubusercontent.com/htlin222/claude-with-webhook/main"
+GITHUB_REPO="htlin222/claude-with-webhook"
+RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main"
 SERVER_DIR="$HOME/.claude-webhook"
 
 echo "=== Claude Webhook Installer ==="
@@ -19,13 +20,25 @@ fi
 
 REPO_DIR=$(git rev-parse --show-toplevel)
 
-# Check prerequisites.
+# Check prerequisites (Go is NOT required — we download the binary).
 missing=()
-for cmd in go gh claude tailscale git jq openssl; do
+for cmd in gh claude git jq openssl; do
   if ! command -v "$cmd" &>/dev/null; then
     missing+=("$cmd")
   fi
 done
+
+# Need at least one tunnel tool.
+has_tunnel=false
+for cmd in tailscale ngrok zrok; do
+  if command -v "$cmd" &>/dev/null; then
+    has_tunnel=true
+    break
+  fi
+done
+if [ "$has_tunnel" = false ]; then
+  missing+=("tailscale/ngrok/zrok")
+fi
 
 if [ ${#missing[@]} -gt 0 ]; then
   echo "ERROR: Missing required tools: ${missing[*]}"
@@ -34,42 +47,55 @@ fi
 
 echo "All prerequisites found."
 
-# --- Central server setup ---
+# --- Detect platform ---
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  ARCH="amd64" ;;
+  aarch64) ARCH="arm64" ;;
+  arm64)   ARCH="arm64" ;;
+  *)       echo "ERROR: Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+BINARY_NAME="claude-webhook-server-${OS}-${ARCH}"
+echo "Platform: ${OS}/${ARCH}"
+
+# --- Download binary from latest release ---
 mkdir -p "$SERVER_DIR"
 
-# Find source: prefer local clone, fall back to GitHub download.
-LOCAL_SRC=""
-if [ -f "$SERVER_DIR/source-repo" ]; then
-  CANDIDATE=$(cat "$SERVER_DIR/source-repo")
-  if [ -f "$CANDIDATE/main.go" ] && [ -f "$CANDIDATE/go.mod" ]; then
-    LOCAL_SRC="$CANDIDATE"
-  fi
-fi
-# Also check if we're running from the webhook repo itself.
-if [ -z "$LOCAL_SRC" ] && [ -f "$REPO_DIR/main.go" ] && grep -q "claude-with-webhook" "$REPO_DIR/go.mod" 2>/dev/null; then
-  LOCAL_SRC="$REPO_DIR"
-fi
+echo "Downloading latest binary..."
+gh release download --repo "$GITHUB_REPO" \
+  --pattern "$BINARY_NAME" \
+  --dir "$SERVER_DIR" \
+  --clobber
+mv "$SERVER_DIR/$BINARY_NAME" "$SERVER_DIR/claude-webhook-server"
+chmod +x "$SERVER_DIR/claude-webhook-server"
+echo "Installed: $SERVER_DIR/claude-webhook-server"
 
-VERSION=$(git -C "${LOCAL_SRC:-$SERVER_DIR}" describe --tags --always --dirty 2>/dev/null || echo "dev")
-BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS="-X main.version=$VERSION -X main.buildTime=$BUILD_TIME"
+# --- Download scripts ---
+echo "Downloading scripts..."
+for script in register status; do
+  curl -sL "$RAW_URL/scripts/$script" -o "$SERVER_DIR/$script"
+  chmod +x "$SERVER_DIR/$script"
+done
 
-if [ -n "$LOCAL_SRC" ]; then
-  echo "Building from local source: $LOCAL_SRC"
-  go build -C "$LOCAL_SRC" -ldflags "$LDFLAGS" -o "$SERVER_DIR/claude-webhook-server" .
-  # Remember where the source lives for future rebuilds.
-  echo "$LOCAL_SRC" > "$SERVER_DIR/source-repo"
-else
-  echo "Downloading source from GitHub..."
-  curl -sL "$REPO_URL/main.go"      -o "$SERVER_DIR/main.go"
-  curl -sL "$REPO_URL/go.mod"       -o "$SERVER_DIR/go.mod"
-  curl -sL "$REPO_URL/.env.example" -o "$SERVER_DIR/.env.example"
-  echo "Building server..."
-  (cd "$SERVER_DIR" && go build -ldflags "$LDFLAGS" -o claude-webhook-server .)
-fi
-echo "Built: $SERVER_DIR/claude-webhook-server"
+# Create start/stop scripts.
+cat > "$SERVER_DIR/start" <<'STARTEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
+exec ./claude-webhook-server "$@"
+STARTEOF
+chmod +x "$SERVER_DIR/start"
 
-# Generate .env if not present.
+cat > "$SERVER_DIR/stop" <<'STOPEOF'
+#!/usr/bin/env bash
+pkill -f claude-webhook-server 2>/dev/null && echo "Server stopped." || echo "Server not running."
+STOPEOF
+chmod +x "$SERVER_DIR/stop"
+
+# --- Generate .env if not present ---
 if [ -f "$SERVER_DIR/.env" ]; then
   echo ".env already exists, reusing."
 else
@@ -94,24 +120,22 @@ set +a
 REPOS_CONF="$SERVER_DIR/repos.conf"
 touch "$REPOS_CONF"
 
-GH_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
-if [ -z "$GH_REPO" ]; then
+GH_REPO_NAME=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
+if [ -z "$GH_REPO_NAME" ]; then
   echo "ERROR: Could not detect GitHub repo name."
   exit 1
 fi
 
-# Add or update repo entry.
-if grep -q "^${GH_REPO}=" "$REPOS_CONF" 2>/dev/null; then
-  # Update existing entry.
-  sed -i.bak "s|^${GH_REPO}=.*|${GH_REPO}=${REPO_DIR}|" "$REPOS_CONF"
+if grep -q "^${GH_REPO_NAME}=" "$REPOS_CONF" 2>/dev/null; then
+  sed -i.bak "s|^${GH_REPO_NAME}=.*|${GH_REPO_NAME}=${REPO_DIR}|" "$REPOS_CONF"
   rm -f "$REPOS_CONF.bak"
-  echo "Updated repo: $GH_REPO → $REPO_DIR"
+  echo "Updated repo: $GH_REPO_NAME → $REPO_DIR"
 else
-  echo "${GH_REPO}=${REPO_DIR}" >> "$REPOS_CONF"
-  echo "Registered repo: $GH_REPO → $REPO_DIR"
+  echo "${GH_REPO_NAME}=${REPO_DIR}" >> "$REPOS_CONF"
+  echo "Registered repo: $GH_REPO_NAME → $REPO_DIR"
 fi
 
-# Signal running server to reload repos.conf (if running).
+# Signal running server to reload.
 if pkill -HUP -f claude-webhook-server 2>/dev/null; then
   echo "Sent SIGHUP to running server — repos.conf reloaded."
 else
@@ -120,28 +144,10 @@ fi
 
 # Create worktrees dir in the repo.
 mkdir -p "$REPO_DIR/worktrees"
-
-# Add worktrees/ to .gitignore if not already there.
 if ! grep -qx 'worktrees/' "$REPO_DIR/.gitignore" 2>/dev/null; then
   echo 'worktrees/' >> "$REPO_DIR/.gitignore"
   echo "Added worktrees/ to .gitignore"
 fi
-
-# --- Create start/stop scripts ---
-cat > "$SERVER_DIR/start" <<'STARTEOF'
-#!/usr/bin/env bash
-set -euo pipefail
-DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$DIR"
-exec ./claude-webhook-server "$@"
-STARTEOF
-chmod +x "$SERVER_DIR/start"
-
-cat > "$SERVER_DIR/stop" <<'STOPEOF'
-#!/usr/bin/env bash
-pkill -f claude-webhook-server 2>/dev/null && echo "Server stopped." || echo "Server not running."
-STOPEOF
-chmod +x "$SERVER_DIR/stop"
 
 # --- Ensure gh has admin:repo_hook scope ---
 echo "Checking GitHub CLI scopes..."
@@ -153,56 +159,20 @@ else
   gh auth refresh -h github.com -s admin:repo_hook
 fi
 
-# --- Tailscale Funnel (reuse if already running) ---
-TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
-
-FUNNEL_STATUS=$(tailscale funnel status 2>&1 || true)
-if echo "$FUNNEL_STATUS" | grep -q "proxy http://127.0.0.1:${PORT}"; then
-  echo "Tailscale Funnel already running on port $PORT."
-else
-  echo "Setting up Tailscale Funnel on port $PORT..."
-  tailscale funnel --bg "$PORT"
-fi
-
-WEBHOOK_URL="https://${TS_HOSTNAME}/${GH_REPO}/webhook"
-echo "Webhook URL: $WEBHOOK_URL"
-
-# --- Create or update GitHub webhook ---
-EXISTING_HOOK=$(gh api "repos/$GH_REPO/hooks" --jq ".[] | select(.config.url == \"$WEBHOOK_URL\") | .id" 2>/dev/null || true)
-
-if [ -n "$EXISTING_HOOK" ]; then
-  echo "Updating existing webhook..."
-  gh api "repos/$GH_REPO/hooks/$EXISTING_HOOK" --method PATCH \
-    -f "config[url]=$WEBHOOK_URL" \
-    -f 'config[content_type]=json' \
-    -f "config[secret]=$GITHUB_WEBHOOK_SECRET" \
-    -f 'events[]=issues' \
-    -f 'events[]=issue_comment' \
-    -F active=true --silent
-else
-  echo "Creating webhook..."
-  gh api "repos/$GH_REPO/hooks" --method POST \
-    -f name=web \
-    -f "config[url]=$WEBHOOK_URL" \
-    -f 'config[content_type]=json' \
-    -f "config[secret]=$GITHUB_WEBHOOK_SECRET" \
-    -f 'events[]=issues' \
-    -f 'events[]=issue_comment' \
-    -F active=true --silent
-fi
-echo "Webhook configured for $GH_REPO"
+# --- Tunnel setup (reuse register script logic) ---
+"$SERVER_DIR/register"
 
 echo
 echo "=== Installation Complete ==="
 echo
-echo "Repo registered: $GH_REPO → $REPO_DIR"
+echo "Repo registered: $GH_REPO_NAME → $REPO_DIR"
 echo "Server dir:      $SERVER_DIR"
-echo "Webhook URL:     $WEBHOOK_URL"
 echo
 echo "  Start:    $SERVER_DIR/start"
 echo "  Stop:     $SERVER_DIR/stop"
-echo "  Repos:    cat $SERVER_DIR/repos.conf"
-echo "  Logs:     $SERVER_DIR/start 2>&1 | tee $SERVER_DIR/server.log"
+echo "  Status:   $SERVER_DIR/status"
+echo "  Register: cd /path/to/repo && $SERVER_DIR/register"
 echo
-echo "Add more repos: cd /path/to/another-repo && curl -sL $REPO_URL/remote-install.sh | bash"
+echo "Add more repos:"
+echo "  cd /path/to/another-repo && $SERVER_DIR/register"
 echo
