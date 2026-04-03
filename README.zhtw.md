@@ -1,5 +1,10 @@
 # Claude Code Webhook Server
 
+[![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub issues](https://img.shields.io/github/issues/htlin222/claude-with-webhook)](https://github.com/htlin222/claude-with-webhook/issues)
+[![GitHub stars](https://img.shields.io/github/stars/htlin222/claude-with-webhook)](https://github.com/htlin222/claude-with-webhook/stargazers)
+
 [English](README.md)
 
 一個用 Go 撰寫的伺服器，透過 GitHub Issues 自動化 Claude Code 的規劃與實作流程。單一伺服器可處理多個 repo，透過 URL 路徑路由。當允許的使用者開啟 Issue 時，Claude 會自動產生計畫；經核准後，Claude 會在 git worktree 中實作變更並開啟 PR。
@@ -150,6 +155,20 @@ cd /path/to/your-repo
 3. 實作所需變更
 4. 提交並推送至 PR 分支
 
+## Issue 標籤
+
+伺服器會自動管理 Issue 上的工作流程標籤，追蹤進度：
+
+| 標籤 | 時機 | 意義 |
+|------|------|------|
+| `planning` | Issue 開啟 / `@claude plan` | Claude 正在產生計畫 |
+| `planned` | 計畫已發布 | 計畫已可供審閱 |
+| `implementing` | `@claude approve` | Claude 正在撰寫程式碼 |
+| `review` | PR 已建立 | 實作已可供審閱 |
+| `done` | PR 自動合併 | Issue 已完全解決 |
+
+標籤會自動建立（若不存在）。同一時間只會有一個工作流程標籤 — 進入下一階段時會移除前一個。
+
 ## 架構
 
 ```
@@ -254,6 +273,7 @@ VM（以機器人帳號認證）──→ claude-webhook-server
 - **錯誤清洗** — 發布到 GitHub 的錯誤留言會截斷至 500 字元，含有敏感關鍵字（`token`、`key`、`secret`、`password`、`credential`）的行會被移除，絕對路徑會被遮蔽
 - **過濾式 git add** — 符合危險模式的檔案（`.env*`、`*.pem`、`*.key`、`*credential*`、`*secret*`、`*token*`、`node_modules/`、`.git/`）永遠不會被暫存或提交
 - **Worktree 隔離** — 所有實作都在獨立的 git worktree 中執行，不影響主要 checkout
+- **主機名稱驗證** — 啟動時，伺服器會檢查每個已註冊 repo 的 GitHub webhook URL 是否與目前的 tunnel 主機名稱一致；不一致時會記錄警告，提醒需要重新註冊
 
 ## 管理 Repo
 

@@ -4,7 +4,7 @@
 [![Last Commit](https://img.shields.io/github/last-commit/htlin222/claude-with-webhook)](https://github.com/htlin222/claude-with-webhook/commits/main)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
+[![GitHub issues](https://img.shields.io/github/issues/htlin222/claude-with-webhook)](https://github.com/htlin222/claude-with-webhook/issues)
 [繁體中文](README.zhtw.md)
 
 A Go server that automates Claude Code planning and implementation via GitHub issues. One server handles multiple repos, routed by URL path. When an allowed user opens an issue, Claude generates a plan. On approval, Claude implements the changes in a git worktree and opens a PR.
@@ -166,6 +166,20 @@ On approve (from a PR), Claude will:
 3. Implement the requested changes
 4. Commit and push to the PR branch
 
+## Issue Labels
+
+The server automatically manages workflow labels on issues to track progress:
+
+| Label | When | Meaning |
+|-------|------|---------|
+| `planning` | Issue opened / `@claude plan` | Claude is generating a plan |
+| `planned` | Plan posted | Plan ready for review |
+| `implementing` | `@claude approve` | Claude is writing code |
+| `review` | PR created | Implementation ready for review |
+| `done` | PR auto-merged | Issue fully resolved |
+
+Labels are created automatically if they don't exist. Only one workflow label is active at a time — the previous one is removed when the next stage begins.
+
 ## Architecture
 
 ```
@@ -270,6 +284,7 @@ The server includes several hardening measures:
 - **Error sanitization** — Error comments posted to GitHub are truncated to 500 chars, lines containing secret keywords (`token`, `key`, `secret`, `password`, `credential`) are stripped, and absolute file paths are redacted
 - **Filtered git add** — Files matching dangerous patterns (`.env*`, `*.pem`, `*.key`, `*credential*`, `*secret*`, `*token*`, `node_modules/`, `.git/`) are never staged or committed
 - **Worktree isolation** — All implementations run in isolated git worktrees, not the main checkout
+- **Hostname validation** — On startup, the server checks that each registered repo's GitHub webhook URL matches the current tunnel hostname; mismatches are logged as warnings so you know to re-register
 
 ## Managing Repos
 

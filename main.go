@@ -330,6 +330,9 @@ func main() {
 		log.Printf("  %s → %s", repo, dir)
 	}
 
+	// Check webhook URLs match current tunnel hostname.
+	go checkWebhookHostnames(cfg)
+
 	addr := ":" + cfg.Port
 	log.Printf("listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
@@ -403,6 +406,59 @@ func loadRepos(path string) map[string]string {
 		}
 	}
 	return repos
+}
+
+// checkWebhookHostnames verifies that each registered repo's GitHub webhook URL
+// matches the current tunnel hostname. Logs warnings for mismatches so the user
+// knows to re-register.
+func checkWebhookHostnames(cfg *Config) {
+	// Detect current tunnel hostname.
+	tunnelFile := filepath.Join(cfg.BaseDir, ".tunnel")
+	tunnelType, err := os.ReadFile(tunnelFile)
+	if err != nil {
+		return // no tunnel configured
+	}
+
+	var currentHost string
+	switch strings.TrimSpace(string(tunnelType)) {
+	case "tailscale":
+		out, err := exec.Command("tailscale", "status", "--json").Output()
+		if err != nil {
+			return
+		}
+		var ts struct {
+			Self struct {
+				DNSName string `json:"DNSName"`
+			} `json:"Self"`
+		}
+		if json.Unmarshal(out, &ts) != nil {
+			return
+		}
+		currentHost = strings.TrimSuffix(ts.Self.DNSName, ".")
+	default:
+		return // only tailscale supported for now
+	}
+
+	if currentHost == "" {
+		return
+	}
+
+	repos := cfg.AllRepos()
+	for repo := range repos {
+		out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/hooks", repo),
+			"--jq", ".[].config.url").Output()
+		if err != nil {
+			continue
+		}
+		for _, url := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if url == "" || !strings.HasSuffix(url, "/webhook") {
+				continue
+			}
+			if !strings.Contains(url, currentHost) {
+				log.Printf("⚠️  HOSTNAME MISMATCH: %s webhook points to %s but current hostname is %s — run: cd <repo> && ~/.claude-webhook/register", repo, url, currentHost)
+			}
+		}
+	}
 }
 
 // loadDotenv reads a .env file and sets any variables not already in the environment.
@@ -549,6 +605,7 @@ func handlePlan(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
 // runPlan generates a Claude plan for an issue and posts it as a comment.
 func runPlan(repo, repoDir string, num int, title, issueBody string) {
 	log.Printf("[%s] planning for issue #%d: %s", repo, num, title)
+	setIssueLabel(repo, repoDir, num, "planning")
 
 	updateComment, _ := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Planning…\n\n%s", spinnerImg))
 
@@ -570,6 +627,7 @@ func runPlan(repo, repoDir string, num int, title, issueBody string) {
 
 	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve --auto-merge\n@claude approve focus on error handling and add tests\n@claude approve --auto-merge 請用繁體中文寫註解\n@claude plan (re-generate this plan)\n@claude <follow-up question>\n```%s", planText, formatMetadataFooter(result))
 	updateComment(body)
+	setIssueLabel(repo, repoDir, num, "planned")
 }
 
 // classifyComment determines what action to take on a comment.
@@ -899,6 +957,7 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		return
 	}
 
+	setIssueLabel(repo, repoDir, num, "implementing")
 	updateComment, deleteSpinner := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Implementing…\n\n%s", spinnerImg))
 
 	if _, err := runCmd(repoDir, gitTimeout, "git", "fetch", "origin", "main"); err != nil {
@@ -985,12 +1044,14 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 
 	prURL = strings.TrimSpace(prURL)
 	deleteSpinner()
+	setIssueLabel(repo, repoDir, num, "review")
 
 	// Auto-merge if requested: try direct squash merge first (no CI),
 	// fall back to --auto (CI pending).
 	if autoMerge {
 		if _, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "merge", "--squash", "--repo", repo, branch); err == nil {
 			log.Printf("[%s#%d] PR merged directly (squash) for %s", repo, num, prURL)
+			setIssueLabel(repo, repoDir, num, "done")
 			postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created and merged: %s", prURL))
 		} else if _, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "merge", "--auto", "--squash", "--repo", repo, branch); err == nil {
 			log.Printf("[%s#%d] auto-merge enabled for %s", repo, num, prURL)
@@ -1506,6 +1567,33 @@ func postProgressComment(repo, repoDir string, num int, placeholder string) (upd
 	}
 
 	return update, delete
+}
+
+// setIssueLabel sets the workflow label on an issue, removing any previous workflow labels.
+// Labels: planning, planned, implementing, review, done.
+func setIssueLabel(repo, repoDir string, num int, label string) {
+	workflowLabels := map[string]bool{
+		"planning": true, "planned": true, "implementing": true, "review": true, "done": true,
+	}
+
+	// Fetch current labels on the issue.
+	endpoint := fmt.Sprintf("repos/%s/issues/%d/labels", repo, num)
+	out, err := runCmd(repoDir, gitTimeout, "gh", "api", endpoint, "--jq", ".[].name")
+	if err == nil {
+		for _, existing := range strings.Split(strings.TrimSpace(out), "\n") {
+			existing = strings.TrimSpace(existing)
+			if existing != label && workflowLabels[existing] {
+				rmEndpoint := fmt.Sprintf("repos/%s/issues/%d/labels/%s", repo, num, existing)
+				exec.Command("gh", "api", rmEndpoint, "--method", "DELETE").Run()
+			}
+		}
+	}
+
+	// Add the new label (creates it if it doesn't exist).
+	_, err = runCmd(repoDir, gitTimeout, "gh", "api", endpoint, "-f", fmt.Sprintf("labels[]=%s", label))
+	if err != nil {
+		log.Printf("[%s#%d] failed to set label %q: %v", repo, num, label, err)
+	}
 }
 
 // reactToIssue adds an 👀 emoji reaction to an issue.
