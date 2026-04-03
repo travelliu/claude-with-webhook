@@ -59,10 +59,14 @@ if [ "$TUNNEL_TYPE" = "tailscale" ] || { [ -z "$TUNNEL_TYPE" ] && command -v tai
     fi
 
     FUNNEL_STATUS=$(tailscale funnel status 2>&1 || true)
-    if echo "$FUNNEL_STATUS" | grep -q "proxy http://127.0.0.1:${PORT}"; then
+    if echo "$FUNNEL_STATUS" | grep -qE "proxy http://(127\.0\.0\.1|localhost):${PORT}"; then
       echo -e "  Funnel     ${GREEN} active → localhost:${PORT}"
+    elif echo "$FUNNEL_STATUS" | grep -q "Funnel on"; then
+      echo -e "  Funnel     ${YELLOW} active but NOT routing to port ${PORT}"
+      echo -e "             ${DIM}Run: tailscale funnel --bg ${PORT}${RESET}"
     else
       echo -e "  Funnel     ${RED} not active"
+      echo -e "             ${DIM}Run: tailscale funnel --bg ${PORT}${RESET}"
     fi
   else
     echo -e "  Tunnel     ${RED} tailscale (not installed)"

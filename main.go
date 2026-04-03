@@ -435,6 +435,9 @@ func checkWebhookHostnames(cfg *Config) {
 			return
 		}
 		currentHost = strings.TrimSuffix(ts.Self.DNSName, ".")
+
+		// Check that Tailscale Funnel is routing to our port.
+		checkTailscaleFunnel(cfg.Port)
 	default:
 		return // only tailscale supported for now
 	}
@@ -458,6 +461,31 @@ func checkWebhookHostnames(cfg *Config) {
 				log.Printf("⚠️  HOSTNAME MISMATCH: %s webhook points to %s but current hostname is %s — run: cd <repo> && ~/.claude-webhook/register", repo, url, currentHost)
 			}
 		}
+	}
+}
+
+// checkTailscaleFunnel verifies that Tailscale Funnel is routing to our port.
+// If not, it attempts to add the route automatically.
+func checkTailscaleFunnel(port string) {
+	out, err := exec.Command("tailscale", "funnel", "status").CombinedOutput()
+	if err != nil {
+		log.Printf("⚠️  FUNNEL CHECK: could not query funnel status: %v", err)
+		return
+	}
+
+	status := string(out)
+	portPattern := "127.0.0.1:" + port
+	localhostPattern := "localhost:" + port
+
+	if strings.Contains(status, portPattern) || strings.Contains(status, localhostPattern) {
+		return // funnel is routing to our port
+	}
+
+	log.Printf("⚠️  FUNNEL NOT ROUTING to port %s — attempting to add route...", port)
+	if addErr := exec.Command("tailscale", "funnel", "--bg", port).Run(); addErr != nil {
+		log.Printf("⚠️  FUNNEL FIX FAILED: could not add funnel route to port %s: %v — run: tailscale funnel --bg %s", port, addErr, port)
+	} else {
+		log.Printf("✅ FUNNEL FIXED: added route to port %s", port)
 	}
 }
 
