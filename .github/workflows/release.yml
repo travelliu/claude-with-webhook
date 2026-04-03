@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION="${GITHUB_SHA::7}"
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          LDFLAGS="-X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}"
+          OUTPUT="claude-webhook-server-${GOOS}-${GOARCH}"
+          go build -ldflags "${LDFLAGS}" -o "${OUTPUT}" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-webhook-server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: claude-webhook-server-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          SHA="${GITHUB_SHA::7}"
+          TAG="build-${SHA}"
+
+          # Delete existing release/tag if re-running
+          gh release delete "${TAG}" --yes 2>/dev/null || true
+          gh api "repos/${GH_REPO}/git/refs/tags/${TAG}" -X DELETE 2>/dev/null || true
+
+          chmod +x binaries/claude-webhook-server-*
+          gh release create "${TAG}" binaries/claude-webhook-server-* \
+            --title "${SHA}" \
+            --notes "Auto-built from [${GITHUB_SHA}](https://github.com/${GH_REPO}/commit/${GITHUB_SHA})" \
+            --latest
