@@ -312,10 +312,12 @@ func (s *Server) runAgent(dir string, timeout time.Duration, prompt string, task
 
 	systemPrompt := loadSystemPrompt(s.config.BaseDir, "", "")
 	token := s.botToken(bot)
+	taskLog := slog.Default().With("task", taskID)
 	opts := agent.ExecOptions{
 		Cwd:          dir,
 		Timeout:      timeout,
 		SystemPrompt: systemPrompt,
+		Logger:       taskLog,
 		Env: map[string]string{
 			"GITHUB_TOKEN": token,
 		},

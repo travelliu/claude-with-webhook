@@ -98,6 +98,11 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, opts ExecOp
 		defer close(msgCh)
 		defer close(resCh)
 
+		log := opts.Logger
+		if log == nil {
+			log = slog.Default()
+		}
+
 		startTime := time.Now()
 		var output strings.Builder
 		var sessionID string
@@ -127,14 +132,14 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, opts ExecOp
 
 			switch msg.Type {
 			case "assistant":
-				handleClaudeAssistant(msg, msgCh, &output, usage)
+				handleClaudeAssistant(msg, msgCh, &output, usage, log)
 			case "user":
-				handleClaudeUser(msg, msgCh)
+				handleClaudeUser(msg, msgCh, log)
 			case "system":
 				if msg.SessionID != "" {
 					sessionID = msg.SessionID
 				}
-				slog.Debug("claude system", "subtype", msg.Subtype, "session", sessionID)
+				log.Debug("claude system", "subtype", msg.Subtype, "session", sessionID)
 				trySend(msgCh, Message{Type: MessageStatus, Status: "running", SessionID: sessionID, ReceivedAt: msg.ReceivedAt})
 			case "result":
 				sessionID = msg.SessionID
@@ -149,10 +154,9 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, opts ExecOp
 					finalStatus = "failed"
 					finalError = msg.ResultText
 				}
-				slog.Info("claude result", "session", sessionID, "is_error", msg.IsError, "result_len", len(msg.ResultText))
+				log.Info("claude result", "session", sessionID, "is_error", msg.IsError, "result_len", len(msg.ResultText))
 			case "log":
 				if msg.Log != nil {
-					slog.Debug("claude log", "level", msg.Log.Level, "msg", msg.Log.Message)
 					trySend(msgCh, Message{
 						Type:       MessageLog,
 						Level:      msg.Log.Level,

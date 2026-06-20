@@ -642,7 +642,7 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 	}
 
 	prTitle := fmt.Sprintf("Fix #%d: %s", num, title)
-	prBody := fmt.Sprintf("Closes #%d\n\nImplemented automatically by Claude.", num)
+	prBody := s.generatePRDescription(repo, num, title, worktreeDir, bot)
 	prURL, err := runCmdWithToken(worktreeDir, gitTimeout, token, "gh", "pr", "create", "--title", prTitle, "--body", prBody, "--repo", repo)
 	if err != nil {
 		updateComment(formatError("Failed to create PR", err))
@@ -785,6 +785,71 @@ func isLGTM(reviewText string) bool {
 		return true
 	}
 	return false
+}
+
+// generatePRDescription creates a detailed PR description by analyzing the git diff and issue context.
+func (s *Server) generatePRDescription(repo string, num int, issueTitle string, worktreeDir string, bot *BotConfig) string {
+	diff, err := runCmd(worktreeDir, gitTimeout, "git", "diff", "HEAD~1")
+	if err != nil {
+		diff, err = runCmd(worktreeDir, gitTimeout, "git", "diff", "HEAD")
+		if err != nil {
+			s.log.Warn("generatePRDescription: failed to get diff", "error", err)
+			return fmt.Sprintf("Closes #%d\n\nImplemented automatically by Claude.", num)
+		}
+	}
+	diff = strings.TrimSpace(diff)
+	if diff == "" {
+		diff, _ = runCmd(worktreeDir, gitTimeout, "git", "diff", "--cached")
+		diff = strings.TrimSpace(diff)
+	}
+	if diff == "" {
+		return fmt.Sprintf("Closes #%d\n\nNo code changes detected.", num)
+	}
+
+	stat, _ := runCmd(worktreeDir, gitTimeout, "git", "diff", "--stat", "HEAD~1")
+	stat = strings.TrimSpace(stat)
+
+	if len(diff) > maxDiffLen {
+		diff = diff[:maxDiffLen] + "\n... (truncated)"
+	}
+
+	prompt := fmt.Sprintf(`## Task: Generate Pull Request Description
+
+Write a concise but informative pull request description based on the issue and code changes below.
+
+### Requirements
+- Start with "Closes #%d" on the first line
+- Include a brief summary of what was changed and why
+- List the key changes made (bullet points)
+- Mention files modified if relevant
+- Keep it under 300 words
+- Do NOT include code blocks or diff output
+- Write in English
+- Output ONLY the PR description text, nothing else
+
+### Issue: %s
+
+### Code Changes (diff stat)
+%s
+
+### Full Diff
+%s`, num, issueTitle, stat, "```diff\n"+diff+"\n```")
+
+	taskID := fmt.Sprintf("%s#%d-pr-desc", repo, num)
+	result, err := s.runAgent(worktreeDir, 2*time.Minute, prompt, taskID, true, bot)
+	if err != nil {
+		s.log.Warn("generatePRDescription: agent failed, using fallback", "error", err)
+		return fmt.Sprintf("Closes #%d\n\nImplemented automatically by Claude.", num)
+	}
+
+	output := strings.TrimSpace(result.Output)
+	if output == "" || !strings.Contains(strings.ToLower(output), "closes") {
+		s.log.Warn("generatePRDescription: agent output missing Closes keyword, using fallback")
+		return fmt.Sprintf("Closes #%d\n\nImplemented automatically by Claude.", num)
+	}
+
+	s.log.Info("PR description generated", "repo", repo, "issue", num, "len", len(output))
+	return output
 }
 
 // handlePRComment handles comments on pull requests.

@@ -27,6 +27,7 @@ type ExecOptions struct {
 	ResumeSessionID string            `json:"resumeSessionId,omitempty"`
 	ExtraArgs       []string          `json:"extraArgs,omitempty"`
 	Env             map[string]string `json:"env,omitempty"`
+	Logger          *slog.Logger      `json:"-"` // Logger with task context attached
 }
 
 // Session holds channels for streaming messages and the final result.
@@ -133,18 +134,22 @@ func RunSync(b Backend, ctx context.Context, prompt string, opts ExecOptions) (*
 	}
 	// Drain messages, log key events
 	go func() {
+		log := opts.Logger
+		if log == nil {
+			log = slog.Default()
+		}
 		var toolCount int32
 		for msg := range sess.Messages {
 			switch msg.Type {
 			case MessageText:
-				slog.Debug("agent: text", "bytes", len(msg.Content))
+				log.Debug("agent: text", "bytes", len(msg.Content))
 			case MessageToolUse:
 				toolCount++
-				slog.Info(fmt.Sprintf("agent: tool #%d: %s", toolCount, msg.Tool))
+				log.Info(fmt.Sprintf("agent: tool #%d: %s", toolCount, msg.Tool))
 			case MessageToolResult:
-				slog.Debug("agent: tool_result", "call_id", msg.CallID)
+				log.Debug("agent: tool_result", "call_id", msg.CallID)
 			case MessageLog:
-				slog.Debug("agent: log", "level", msg.Level, "msg", msg.Content)
+				log.Debug("agent: log", "level", msg.Level, "msg", msg.Content)
 			}
 		}
 	}()

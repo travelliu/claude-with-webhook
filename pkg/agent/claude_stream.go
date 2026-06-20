@@ -15,7 +15,7 @@ const (
 	claudeBlockToolResult       = "tool_result"
 )
 
-func handleClaudeAssistant(msg claudeSDKMessage, ch chan<- Message, output *strings.Builder, usage map[string]TokenUsage) {
+func handleClaudeAssistant(msg claudeSDKMessage, ch chan<- Message, output *strings.Builder, usage map[string]TokenUsage, log *slog.Logger) {
 	var content claudeMessageContent
 	if err := json.Unmarshal(msg.Message, &content); err != nil {
 		return
@@ -35,7 +35,6 @@ func handleClaudeAssistant(msg claudeSDKMessage, ch chan<- Message, output *stri
 		case claudeBlockText:
 			if block.Text != "" {
 				output.WriteString(block.Text)
-				slog.Debug("claude text", "len", len(block.Text), "preview", truncateForLog(block.Text, 100))
 				trySend(ch, Message{Type: MessageText, Content: block.Text, ReceivedAt: msg.ReceivedAt})
 			}
 		case claudeBlockThinking:
@@ -52,7 +51,6 @@ func handleClaudeAssistant(msg claudeSDKMessage, ch chan<- Message, output *stri
 			if block.Input != nil {
 				_ = json.Unmarshal(block.Input, &input)
 			}
-			slog.Debug("claude tool_use", "tool", block.Name, "call_id", block.ID)
 			trySend(ch, Message{
 				Type:       MessageToolUse,
 				Tool:       block.Name,
@@ -61,14 +59,14 @@ func handleClaudeAssistant(msg claudeSDKMessage, ch chan<- Message, output *stri
 				ReceivedAt: msg.ReceivedAt,
 			})
 		case claudeBlockToolResult:
-			slog.Debug("claude tool_result", "call_id", block.ToolUseID)
+			// Logged by RunSync with task context and sequence number.
 		default:
-			slog.Debug("claude unknown block", "type", block.Type)
+			log.Debug("claude unknown block", "type", block.Type)
 		}
 	}
 }
 
-func handleClaudeUser(msg claudeSDKMessage, ch chan<- Message) {
+func handleClaudeUser(msg claudeSDKMessage, ch chan<- Message, log *slog.Logger) {
 	var content claudeMessageContent
 	if err := json.Unmarshal(msg.Message, &content); err != nil {
 		return
@@ -94,7 +92,7 @@ func handleClaudeUser(msg claudeSDKMessage, ch chan<- Message) {
 		case claudeBlockText:
 			// Embedded text in user messages — no action needed.
 		default:
-			slog.Warn("unhandled user block type", "type", block.Type)
+			log.Warn("unhandled user block type", "type", block.Type)
 		}
 	}
 }
@@ -142,11 +140,3 @@ func claudeResultUsage(msg claudeSDKMessage, fallbackModel string) map[string]To
 	}
 }
 
-// truncateForLog returns s truncated to maxLen characters for compact logging.
-func truncateForLog(s string, maxLen int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
