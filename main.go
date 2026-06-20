@@ -1361,13 +1361,16 @@ func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayloa
 	log.Printf("[%s] pushed PR changes for #%d to branch %s", repo, num, branch)
 }
 
-// runCmdWithStdin executes a command with stdin input.
-func runCmdWithStdin(dir string, timeout time.Duration, stdin string, name string, args ...string) (string, error) {
+// runCmdWithStdin executes a command with stdin input and optional GitHub token.
+func runCmdWithStdin(dir string, timeout time.Duration, token string, stdin string, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	if token != "" {
+		cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+token)
+	}
 	cmd.Stdin = strings.NewReader(stdin)
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
