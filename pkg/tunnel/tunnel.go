@@ -34,10 +34,23 @@ func NewManager(baseDir, port string) *Manager {
 }
 
 // EnsureStarted ensures the tunnel is running, starts it if needed
+// If no tunnel is configured, auto-detects and starts the first available one
 func (m *Manager) EnsureStarted() (string, error) {
 	tunnelType, err := m.detectType()
 	if err != nil {
-		return "", fmt.Errorf("detect tunnel type: %w", err)
+		// No tunnel configured, try to auto-detect
+		log.Println("No tunnel configured, auto-detecting...")
+		tunnelType, err = DetectType()
+		if err != nil {
+			return "", fmt.Errorf("auto-detect tunnel: %w", err)
+		}
+
+		// Save detected type
+		if err := m.SaveType(tunnelType); err != nil {
+			log.Printf("Warning: could not save tunnel type: %v", err)
+		}
+
+		log.Printf("Auto-detected tunnel: %s", tunnelType)
 	}
 
 	switch tunnelType {

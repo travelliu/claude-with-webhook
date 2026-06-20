@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -38,6 +37,7 @@ type Config struct {
 	CommandPrefix  string
 	Port           string
 	BaseDir        string
+	PublicURL      string // User-provided public URL (skip tunnel)
 
 	reposMu sync.RWMutex
 	repos   map[string]string
@@ -72,11 +72,8 @@ func (s *Server) Start() error {
 	// Health check endpoint
 	mux.HandleFunc("/health", s.healthCheckHandler)
 
-	// Global health check
-	mux.HandleFunc("/", s.rootHandler)
-
-	// Webhook endpoints for each repo
-	mux.HandleFunc("/", s.webhookHandler)
+	// Root endpoint (catch-all for now, will be refined)
+	mux.HandleFunc("/", s.webhookCatchAllHandler)
 
 	// Create HTTP server
 	s.httpServer = &http.Server{
@@ -112,7 +109,15 @@ func (s *Server) Start() error {
 }
 
 // ensureTunnel ensures the tunnel is running
+// If user provided PUBLIC_URL, skip tunnel and use that instead
 func (s *Server) ensureTunnel() error {
+	// Check if user provided public URL
+	if s.config.PublicURL != "" {
+		log.Printf("Using public URL: %s (tunnel skipped)", s.config.PublicURL)
+		return nil
+	}
+
+	// Auto-detect and start tunnel
 	url, err := s.tunnelManager.EnsureStarted()
 	if err != nil {
 		return err
@@ -123,16 +128,23 @@ func (s *Server) ensureTunnel() error {
 
 // checkAndUpdateWebhooks checks and updates webhooks if tunnel URL changed
 func (s *Server) checkAndUpdateWebhooks() error {
-	tunnelURL, err := s.tunnelManager.GetURL()
-	if err != nil {
-		return fmt.Errorf("get tunnel URL: %w", err)
+	// Get current public URL
+	var baseURL string
+	if s.config.PublicURL != "" {
+		baseURL = s.config.PublicURL
+		log.Printf("Using configured public URL: %s", baseURL)
+	} else {
+		tunnelURL, err := s.tunnelManager.GetURL()
+		if err != nil {
+			return fmt.Errorf("get tunnel URL: %w", err)
+		}
+		baseURL = tunnelURL
+		log.Printf("Current tunnel URL: %s", baseURL)
 	}
-
-	log.Printf("Current tunnel URL: %s", tunnelURL)
 
 	repos := s.config.GetAllRepos()
 	for repo := range repos {
-		if err := s.checkAndUpdateRepoWebhook(repo, tunnelURL); err != nil {
+		if err := s.checkAndUpdateRepoWebhook(repo, baseURL); err != nil {
 			log.Printf("[%s] webhook check failed: %v", repo, err)
 		}
 	}
@@ -285,6 +297,20 @@ func (s *Server) webhookHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Webhook received (implementation pending)"))
 }
 
+// webhookCatchAllHandler handles webhook routes like /{owner}/{repo}/webhook
+func (s *Server) webhookCatchAllHandler(w http.ResponseWriter, r *http.Request) {
+	// For now, just handle root path
+	if r.URL.Path == "/" {
+		s.rootHandler(w, r)
+		return
+	}
+
+	// TODO: Parse /{owner}/{repo}/webhook route
+	// TODO: Implement webhook handling logic
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Webhook endpoint (implementation pending)"))
+}
+
 // loadRepos loads repos.conf from disk
 func loadRepos(baseDir string) map[string]string {
 	reposFile := fmt.Sprintf("%s/repos.conf", baseDir)
@@ -317,6 +343,12 @@ func loadRepos(baseDir string) map[string]string {
 
 // NewConfig creates a new config from environment variables
 func NewConfig(baseDir string) (*Config, error) {
+	// Load .env file if exists
+	envFile := fmt.Sprintf("%s/.env", baseDir)
+	if err := loadEnvFile(envFile); err != nil {
+		log.Printf("Warning: could not load .env file: %v", err)
+	}
+
 	secret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	if secret == "" {
 		return nil, fmt.Errorf("GITHUB_WEBHOOK_SECRET is required")
@@ -340,12 +372,7 @@ func NewConfig(baseDir string) (*Config, error) {
 		commandPrefix = "@claude"
 	}
 
-	maxConcurrent := 3
-	if v := os.Getenv("MAX_CONCURRENT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			maxConcurrent = n
-		}
-	}
+	publicURL := os.Getenv("PUBLIC_URL") // User-provided public URL
 
 	repos := loadRepos(baseDir)
 
@@ -359,6 +386,34 @@ func NewConfig(baseDir string) (*Config, error) {
 		CommandPrefix:   commandPrefix,
 		Port:            port,
 		BaseDir:         baseDir,
+		PublicURL:       publicURL,
 		repos:           repos,
 	}, nil
+}
+
+// loadEnvFile loads environment variables from .env file
+func loadEnvFile(envFile string) error {
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			if key != "" && !strings.HasPrefix(key, "#") {
+				os.Setenv(key, val)
+			}
+		}
+	}
+
+	return nil
 }
