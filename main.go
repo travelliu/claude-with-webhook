@@ -674,10 +674,19 @@ func runPlan(cfg *Config, repo, repoDir string, num int, title, issueBody string
 	examples := `
 @claude approve
 @claude approve --auto-merge
-@claude approve focus on error handling and add tests
-@claude approve --auto-merge 請用繁體中文寫註解
+@claude approve --polish
+@claude approve [extra guidance]
 @claude plan (re-generate this plan)
 @claude <follow-up question>
+
+**Flags:**
+- --auto-merge: Enable auto-merge after PR creation
+- --polish: Run code review and refinement before creating PR
+
+**Examples:**
+- @claude approve focus on error handling
+- @claude approve add tests for edge cases
+- @claude approve use TypeScript strict mode
 `
 	body := fmt.Sprintf(planCommentTemplate, planText, examples+formatMetadataFooter(result))
 	updateComment(body)
