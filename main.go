@@ -44,6 +44,17 @@ func main() {
 
 // runServer starts the webhook server (existing logic)
 func runServer() {
+	runServerImpl()
+}
+
+// RunServer is the public entry point for starting the server
+// Exported for cmd package to call
+func RunServer() {
+	runServerImpl()
+}
+
+// runServerImpl contains the actual server startup logic
+func runServerImpl() {
 	cfg := loadConfig()
 	log.Printf("claude-webhook-server %s (built %s)", version, buildTime)
 

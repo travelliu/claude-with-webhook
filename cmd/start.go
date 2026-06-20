@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"claude-with-webhook/pkg/server"
+
 	"github.com/spf13/cobra"
 )
 
@@ -47,7 +49,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 // runStartForeground runs the server in the foreground
 func runStartForeground(cmd *cobra.Command) error {
-	configFile := GetConfigFile()
+	baseDir := GetBaseDir()
 
 	// Override with command-line flags
 	if port, _ := cmd.Flags().GetString("port"); port != "" {
@@ -57,21 +59,18 @@ func runStartForeground(cmd *cobra.Command) error {
 		os.Setenv("MAX_CONCURRENT", strconv.Itoa(maxConcurrent))
 	}
 
-	// Start server in foreground (reuses existing main.go logic)
+	// Start server in foreground
 	fmt.Println("Starting server in foreground mode...")
 
-	// Load config from file
-	cfg, err := LoadConfig(configFile)
+	// Create server configuration
+	cfg, err := server.NewConfig(baseDir)
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return fmt.Errorf("create config: %w", err)
 	}
 
-	// Check and update webhooks if tunnel URL changed
-	if err := CheckAndUpdateWebhooks(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: webhook check failed: %v\n", err)
-	}
-
-	return startWebhookServer(cfg)
+	// Create and start server
+	srv := server.New(cfg)
+	return srv.Start()
 }
 
 // runStartBackground runs the server as a daemon
@@ -181,15 +180,6 @@ func buildStartArgs(cmd *cobra.Command) []string {
 	return args
 }
 
-// startWebhookServer starts the webhook server with the given config
-func startWebhookServer(cfg *Config) error {
-	// TODO: Import server logic from main.go
-	// For now, this is a placeholder that will be replaced with actual server startup code
-	fmt.Println("Server startup logic would go here")
-	fmt.Printf("Config: Port=%s, CommandPrefix=%s, BotUsername=%s\n",
-		cfg.Port, cfg.CommandPrefix, cfg.BotUsername)
-	return nil
-}
 
 // --- daemon helpers ---
 
