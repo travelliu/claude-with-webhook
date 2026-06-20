@@ -214,6 +214,18 @@ const (
 ![](https://raw.githubusercontent.com/htlin222/claude-with-webhook/e19f046c9ae189880d65d778f2cb1305978cc52c/assests/spinner.svg)
 
 </div>`
+
+	planCommentTemplate = `## Claude's Plan
+
+> Running with elevated permissions in isolated worktree
+
+%s
+
+---
+
+Comment **@claude** to interact:
+
+%s`
 )
 
 var (
@@ -659,7 +671,15 @@ func runPlan(cfg *Config, repo, repoDir string, num int, title, issueBody string
 		planText = planText[idx:]
 	}
 
-	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve --auto-merge\n@claude approve focus on error handling and add tests\n@claude approve --auto-merge 請用繁體中文寫註解\n@claude plan (re-generate this plan)\n@claude <follow-up question>\n```%s", planText, formatMetadataFooter(result))
+	examples := `
+@claude approve
+@claude approve --auto-merge
+@claude approve focus on error handling and add tests
+@claude approve --auto-merge 請用繁體中文寫註解
+@claude plan (re-generate this plan)
+@claude <follow-up question>
+`
+	body := fmt.Sprintf(planCommentTemplate, planText, examples+formatMetadataFooter(result))
 	updateComment(body)
 	setIssueLabel(cfg, repo, repoDir, num, "planned")
 }
