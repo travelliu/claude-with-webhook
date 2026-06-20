@@ -60,6 +60,7 @@ claude-webhook-server restart -p 9090
 5. **Health Checks** — HTTP endpoint for daemon monitoring
 6. **Command Prefix** — Dynamic prefix support (@claude, @bliu-coder, etc.)
 7. **Bot Identity** — GitHub token and Git authorship configuration
+8. **Auto Webhook Update** — Startup checks tunnel URL and updates GitHub webhooks automatically
 
 ### 🔄 In Progress
 
@@ -120,6 +121,38 @@ BOT_GIT_NAME="Bot User"
 BOT_GIT_EMAIL="bot@example.com"
 COMMAND_PREFIX=@bliu-coder
 MAX_CONCURRENT=5
+```
+
+## Auto Webhook Update
+
+When the server starts, it automatically checks and updates GitHub webhooks if the tunnel URL has changed:
+
+**How it works:**
+1. Detects current tunnel URL (Tailscale/ngrok/zrok)
+2. Checks all registered repos' GitHub webhooks
+3. Updates webhooks if URL mismatch detected
+4. Requires `gh` CLI with `admin:repo_hook` scope
+
+**Supported tunnels:**
+- **Tailscale Funnel** — Stable URLs, rarely needs update
+- **ngrok** — URLs change on restart, auto-update triggers
+- **zrok** — URLs change on restart, auto-update triggers
+
+**Example log output:**
+```
+Current tunnel URL: https://abc.ngrok.io
+[owner/repo] webhook URL mismatch - updating
+  Old: https://old.ngrok.io/owner/repo/webhook
+  New: https://abc.ngrok.io/owner/repo/webhook
+[owner/repo] webhook updated successfully
+Checked/updated 1 repo webhook(s)
+```
+
+**Manual re-registration:**
+If auto-update fails, you can manually re-register:
+```bash
+cd /path/to/repo
+~/.claude-webhook/register
 ```
 
 ## Next Steps

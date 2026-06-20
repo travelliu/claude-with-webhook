@@ -44,6 +44,17 @@ func (c *Config) ReloadRepos() {
 	}
 }
 
+// AllRepos returns a snapshot of the current repo map.
+func (c *Config) AllRepos() map[string]string {
+	c.reposMu.RLock()
+	defer c.reposMu.RUnlock()
+	snapshot := make(map[string]string, len(c.repos))
+	for k, v := range c.repos {
+		snapshot[k] = v
+	}
+	return snapshot
+}
+
 // LoadConfig loads the server configuration from the given file path
 func LoadConfig(configFile string) (*Config, error) {
 	// Get base directory from config file path

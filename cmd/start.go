@@ -66,6 +66,11 @@ func runStartForeground(cmd *cobra.Command) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	// Check and update webhooks if tunnel URL changed
+	if err := CheckAndUpdateWebhooks(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: webhook check failed: %v\n", err)
+	}
+
 	return startWebhookServer(cfg)
 }
 
@@ -125,6 +130,16 @@ func runStartBackground(cmd *cobra.Command) error {
 	// Write PID file
 	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not write PID file: %v\n", err)
+	}
+
+	// Check and update webhooks before waiting for server ready
+	configFile := GetConfigFile()
+	if cfg, err := LoadConfig(configFile); err == nil {
+		if err := CheckAndUpdateWebhooks(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: webhook check failed: %v\n", err)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: could not load config for webhook check: %v\n", err)
 	}
 
 	// Wait for server to be ready (up to 15 seconds)
