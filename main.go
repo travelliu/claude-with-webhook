@@ -22,7 +22,140 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"claude-with-webhook/cmd"
 )
+
+func main() {
+	// Check if subcommands are requested
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "register", "status", "webhook", "tunnel", "help", "--help", "-h":
+			// Delegate to Cobra for subcommands
+			os.Args[0] = "claude-webhook-server"
+			if err := cmd.Execute(); err != nil {
+				os.Exit(1)
+			}
+			return
+		case "start":
+			// Remove 'start' and continue with normal server startup
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+		}
+	}
+
+	// Default behavior: start the server
+	runServer()
+}
+
+// runServer starts the webhook server (existing logic)
+func runServer() {
+	cfg := loadConfig()
+	log.Printf("claude-webhook-server %s (built %s)", version, buildTime)
+
+	maxConcurrent := 3
+	if v := os.Getenv("MAX_CONCURRENT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxConcurrent = n
+		}
+	}
+	semaphore = make(chan struct{}, maxConcurrent)
+	log.Printf("max concurrent jobs: %d", maxConcurrent)
+
+	// Periodically clean up old delivery IDs to prevent unbounded memory growth.
+	go func() {
+		for range time.Tick(10 * time.Minute) {
+			cutoff := time.Now().Add(-1 * time.Hour)
+			deliveryCache.Range(func(key, val any) bool {
+				if val.(time.Time).Before(cutoff) {
+					deliveryCache.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
+
+	// Reload repos.conf on SIGHUP (sent by remote-install.sh after registration).
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	go func() {
+		for range sighup {
+			log.Printf("received SIGHUP, reloading repos.conf...")
+			cfg.ReloadRepos()
+		}
+	}()
+
+	// Graceful shutdown on SIGINT/SIGTERM — log the signal before exiting.
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-shutdown
+		log.Printf("received %s, shutting down...", sig)
+		os.Exit(0)
+	}()
+
+	mux := http.NewServeMux()
+
+	// Global health check.
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	// Version endpoint.
+	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"version":    version,
+			"build_time": buildTime,
+		})
+	})
+
+	// Catch-all handler for /{owner}/{repo}/webhook routes.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		parts := strings.Split(path, "/")
+
+		// Expect: {owner}/{repo}/webhook or {owner}/{repo}/health
+		if len(parts) != 3 {
+			http.NotFound(w, r)
+			return
+		}
+
+		repoFullName := parts[0] + "/" + parts[1]
+		action := parts[2]
+
+		switch action {
+		case "webhook":
+			handleWebhook(w, r, cfg, repoFullName)
+		case "health":
+			repoDir, ok := cfg.GetRepo(repoFullName)
+			if !ok {
+				http.Error(w, fmt.Sprintf("repo %s not registered", repoFullName), http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"status": "ok",
+				"repo":   repoFullName,
+				"path":   repoDir,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	log.Printf("registered repos:")
+	for repo, dir := range cfg.AllRepos() {
+		log.Printf("  %s → %s", repo, dir)
+	}
+
+	// Check webhook URLs match current tunnel hostname.
+	go checkWebhookHostnames(cfg)
+
+	addr := ":" + cfg.Port
+	log.Printf("listening on %s", addr)
+	log.Fatal(http.ListenAndServe(addr, mux))
+}
 
 type Config struct {
 	WebhookSecret  string
@@ -244,115 +377,6 @@ var (
 	secretLinePattern = regexp.MustCompile(`(?i)(token|key|secret|password|credential)`)
 	absPathPattern    = regexp.MustCompile(`/Users/[^\s]+`)
 )
-
-func main() {
-	cfg := loadConfig()
-	log.Printf("claude-webhook-server %s (built %s)", version, buildTime)
-
-	maxConcurrent := 3
-	if v := os.Getenv("MAX_CONCURRENT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			maxConcurrent = n
-		}
-	}
-	semaphore = make(chan struct{}, maxConcurrent)
-	log.Printf("max concurrent jobs: %d", maxConcurrent)
-
-	// Periodically clean up old delivery IDs to prevent unbounded memory growth.
-	go func() {
-		for range time.Tick(10 * time.Minute) {
-			cutoff := time.Now().Add(-1 * time.Hour)
-			deliveryCache.Range(func(key, val any) bool {
-				if val.(time.Time).Before(cutoff) {
-					deliveryCache.Delete(key)
-				}
-				return true
-			})
-		}
-	}()
-
-	// Reload repos.conf on SIGHUP (sent by remote-install.sh after registration).
-	sighup := make(chan os.Signal, 1)
-	signal.Notify(sighup, syscall.SIGHUP)
-	go func() {
-		for range sighup {
-			log.Printf("received SIGHUP, reloading repos.conf...")
-			cfg.ReloadRepos()
-		}
-	}()
-
-	// Graceful shutdown on SIGINT/SIGTERM — log the signal before exiting.
-	shutdown := make(chan os.Signal, 1)
-	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-shutdown
-		log.Printf("received %s, shutting down...", sig)
-		os.Exit(0)
-	}()
-
-	mux := http.NewServeMux()
-
-	// Global health check.
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}`))
-	})
-
-	// Version endpoint.
-	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"version":    version,
-			"build_time": buildTime,
-		})
-	})
-
-	// Catch-all handler for /{owner}/{repo}/webhook routes.
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		parts := strings.Split(path, "/")
-
-		// Expect: {owner}/{repo}/webhook or {owner}/{repo}/health
-		if len(parts) != 3 {
-			http.NotFound(w, r)
-			return
-		}
-
-		repoFullName := parts[0] + "/" + parts[1]
-		action := parts[2]
-
-		switch action {
-		case "webhook":
-			handleWebhook(w, r, cfg, repoFullName)
-		case "health":
-			repoDir, ok := cfg.GetRepo(repoFullName)
-			if !ok {
-				http.Error(w, fmt.Sprintf("repo %s not registered", repoFullName), http.StatusNotFound)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{
-				"status": "ok",
-				"repo":   repoFullName,
-				"path":   repoDir,
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	})
-
-	log.Printf("registered repos:")
-	for repo, dir := range cfg.AllRepos() {
-		log.Printf("  %s → %s", repo, dir)
-	}
-
-	// Check webhook URLs match current tunnel hostname.
-	go checkWebhookHostnames(cfg)
-
-	addr := ":" + cfg.Port
-	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
-}
 
 // loadConfig reads configuration from environment variables, loading .env first.
 func loadConfig() *Config {
