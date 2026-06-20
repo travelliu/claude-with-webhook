@@ -13,6 +13,7 @@ This sets up GitHub webhook and tunnel configuration.`,
 }
 
 func init() {
+	addRegisterCommand()
 	registerCmd.Flags().BoolP("force", "f", false, "Force replace existing webhooks")
 	registerCmd.Flags().BoolP("skip-webhook", "w", false, "Skip webhook configuration")
 	registerCmd.Flags().BoolP("skip-tunnel", "t", false, "Skip tunnel setup")

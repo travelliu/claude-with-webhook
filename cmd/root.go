@@ -34,11 +34,6 @@ func init() {
 	// Persistent flags (available to all subcommands)
 	rootCmd.PersistentFlags().StringP("config", "c", filepath.Join(baseDir, ".env"), "Config file path")
 	rootCmd.PersistentFlags().StringP("base-dir", "b", baseDir, "Base directory for server files")
-
-	// Add subcommands
-	addStartCommand()
-	addRegisterCommand()
-	addStatusCommand()
 }
 
 func getDefaultBaseDir() string {

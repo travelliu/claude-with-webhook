@@ -1,89 +1,243 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"net/http"
 	"os"
-	"os/signal"
+	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
+)
+
+const (
+	flagForeground = "foreground"
 )
 
 var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the webhook server",
-	Long:  `Start the Claude webhook server to listen for GitHub issue/webhook events.`,
-	Run:   runStart,
+	Long:  `Start the Claude webhook server to listen for GitHub issue/webhook events.
+Runs in the background by default. Use --foreground to run in the current terminal.`,
+	RunE:  runStart,
 }
 
 func init() {
+	startCmd.Flags().Bool(flagForeground, false, "Run in the foreground instead of background")
 	startCmd.Flags().StringP("port", "p", "", "Server port (overrides .env PORT)")
 	startCmd.Flags().IntP("max-concurrent", "j", 0, "Max concurrent jobs (overrides .env MAX_CONCURRENT)")
+	addStartCommand()
 }
 
 func addStartCommand() {
 	rootCmd.AddCommand(startCmd)
 }
 
-func runStart(cmd *cobra.Command, args []string) {
-	baseDir := GetBaseDir()
-	configFile := GetConfigFile()
+func runStart(cmd *cobra.Command, args []string) error {
+	foreground, _ := cmd.Flags().GetBool(flagForeground)
+	if foreground {
+		return runStartForeground(cmd)
+	}
+	return runStartBackground(cmd)
+}
 
-	// Load configuration
-	cfg := loadServerConfig(baseDir, configFile)
+// runStartForeground runs the server in the foreground
+func runStartForeground(cmd *cobra.Command) error {
+	configFile := GetConfigFile()
 
 	// Override with command-line flags
 	if port, _ := cmd.Flags().GetString("port"); port != "" {
-		cfg.Port = port
+		os.Setenv("PORT", port)
 	}
 	if maxConcurrent, _ := cmd.Flags().GetInt("max-concurrent"); maxConcurrent > 0 {
-		// Set semaphore size (will be used in server)
-		cmd.Flags().Set("max-concurrent", fmt.Sprintf("%d", maxConcurrent))
+		os.Setenv("MAX_CONCURRENT", strconv.Itoa(maxConcurrent))
 	}
 
-	// Start the server
-	startServer(cfg)
-}
+	// Start server in foreground (reuses existing main.go logic)
+	fmt.Println("Starting server in foreground mode...")
 
-// TODO: Move server startup logic from main.go to here
-func startServer(cfg interface{}) {
-	log.Printf("Claude Webhook Server %s (built %s)", Version, BuildTime)
-	log.Printf("Starting server on port %s", cfg.(*Config).Port)
-	log.Printf("Base directory: %s", GetBaseDir())
-
-	// Signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// TODO: Start HTTP server here
-	// This is a placeholder - the actual server logic from main.go needs to be moved here
-
-	log.Println("Server started. Press Ctrl+C to stop.")
-
-	<-sigChan
-	log.Println("Shutting down server...")
-}
-
-// Temporary Config struct until we move the full implementation
-type Config struct {
-	Port    string
-	BaseDir string
-}
-
-func loadServerConfig(baseDir, configFile string) *Config {
-	// Placeholder for config loading
-	// TODO: Move loadConfig() from main.go here
-	return &Config{
-		Port:    "8080",
-		BaseDir: baseDir,
+	// Load config from file
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
 	}
+
+	return startWebhookServer(cfg)
 }
 
-// TODO: Move all server-related functions from main.go:
-// - handleWebhook
-// - handleIssueOpened
-// - handleIssueComment
-// - runPlan
-// - handleApprove
-// - etc.
+// runStartBackground runs the server as a daemon
+func runStartBackground(cmd *cobra.Command) error {
+	profile := "default" // TODO: support profiles like moclaw
+	pidPath := pidPathForProfile(profile)
+	healthPort := healthPortForProfile(profile)
+
+	// Check if already running
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if isServerRunning(ctx, healthPort) {
+		pid, err := readPIDFile(pidPath)
+		if err == nil && pid > 0 {
+			return fmt.Errorf("server is already running (pid %d) — use 'restart' to restart it", pid)
+		}
+	}
+
+	// Get executable path
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+
+	// Build args for background process
+	args := buildStartArgs(cmd)
+
+	// Create daemon directory
+	daemonDir := daemonDirForProfile(profile)
+	if err := os.MkdirAll(daemonDir, 0755); err != nil {
+		return fmt.Errorf("create daemon directory: %w", err)
+	}
+
+	// Setup log file
+	logPath := logPathForProfile(profile)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open log file %s: %w", logPath, err)
+	}
+
+	// Start background process
+	child := exec.Command(exePath, args...)
+	child.Stdout = logFile
+	child.Stderr = logFile
+	child.SysProcAttr = syscallProcAttr(true)
+
+	if err := child.Start(); err != nil {
+		logFile.Close()
+		return fmt.Errorf("start server: %w", err)
+	}
+	logFile.Close()
+
+	pid := child.Process.Pid
+	child.Process.Release()
+
+	// Write PID file
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write PID file: %v\n", err)
+	}
+
+	// Wait for server to be ready (up to 15 seconds)
+	deadline := time.Now().Add(15 * time.Second)
+	started := false
+	for time.Now().Before(deadline) {
+		time.Sleep(500 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		running := isServerRunning(ctx, healthPort)
+		cancel()
+		if running {
+			started = true
+			break
+		}
+	}
+
+	if !started {
+		fmt.Fprintf(os.Stderr, "Server may not have started. Check logs: %s\n", logPath)
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Server started (pid %d)\n", pid)
+	fmt.Fprintf(os.Stderr, "Logs: %s\n", logPath)
+	return nil
+}
+
+// buildStartArgs constructs args for the background child process
+func buildStartArgs(cmd *cobra.Command) []string {
+	args := []string{"start", "--foreground"}
+
+	// Forward port and max-concurrent flags
+	if port, _ := cmd.Flags().GetString("port"); port != "" {
+		args = append(args, "--port", port)
+	}
+	if maxConcurrent, _ := cmd.Flags().GetInt("max-concurrent"); maxConcurrent > 0 {
+		args = append(args, "--max-concurrent", strconv.Itoa(maxConcurrent))
+	}
+
+	return args
+}
+
+// startWebhookServer starts the webhook server with the given config
+func startWebhookServer(cfg *Config) error {
+	// TODO: Import server logic from main.go
+	// For now, this is a placeholder that will be replaced with actual server startup code
+	fmt.Println("Server startup logic would go here")
+	fmt.Printf("Config: Port=%s, CommandPrefix=%s, BotUsername=%s\n",
+		cfg.Port, cfg.CommandPrefix, cfg.BotUsername)
+	return nil
+}
+
+// --- daemon helpers ---
+
+func daemonDirForProfile(profile string) string {
+	baseDir := GetBaseDir()
+	if profile == "" || profile == "default" {
+		return baseDir
+	}
+	return fmt.Sprintf("%s/profiles/%s", baseDir, profile)
+}
+
+func pidPathForProfile(profile string) string {
+	return fmt.Sprintf("%s/server.pid", daemonDirForProfile(profile))
+}
+
+func logPathForProfile(profile string) string {
+	return fmt.Sprintf("%s/server.log", daemonDirForProfile(profile))
+}
+
+func healthPortForProfile(profile string) int {
+	// TODO: implement profile-specific ports like moclaw
+	port, _ := strconv.Atoi(getConfigEnv("PORT", "8080"))
+	return port + 1 // Use PORT+1 for health endpoint to avoid conflicts
+}
+
+func isServerRunning(ctx context.Context, port int) bool {
+	addr := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
+func readPIDFile(pidPath string) (int, error) {
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, err
+	}
+	return pid, nil
+}
+
+func syscallProcAttr(createNewSession bool) *syscall.SysProcAttr {
+	if createNewSession {
+		return &syscall.SysProcAttr{
+			Setsid: true, // Create new session
+		}
+	}
+	return &syscall.SysProcAttr{}
+}
+
+func getConfigEnv(key, defaultValue string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultValue
+}

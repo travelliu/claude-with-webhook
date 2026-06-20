@@ -13,6 +13,7 @@ and registered repositories.`,
 }
 
 func init() {
+	addStatusCommand()
 	statusCmd.Flags().BoolP("verbose", "v", false, "Show detailed status")
 	statusCmd.Flags().BoolP("json", "j", false, "Output in JSON format")
 }
