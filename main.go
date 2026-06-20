@@ -25,14 +25,15 @@ import (
 )
 
 type Config struct {
-	WebhookSecret string
-	AllowedUsers  map[string]bool
+	WebhookSecret  string
+	AllowedUsers   map[string]bool
 	BotUsername    string   // GitHub username the bot posts as; its own comments are ignored
 	BotGitHubToken string   // GitHub token for gh CLI operations (optional, defaults to gh auth)
 	BotGitName     string   // Git author name for commits (optional)
 	BotGitEmail    string   // Git author email for commits (optional)
-	Port          string
-	BaseDir       string // directory where server lives (~/.claude-webhook)
+	CommandPrefix  string   // Command prefix for triggering bot actions (default: @claude)
+	Port           string
+	BaseDir        string // directory where server lives (~/.claude-webhook)
 
 	reposMu sync.RWMutex
 	repos   map[string]string // "owner/repo" → local path
@@ -384,6 +385,12 @@ func loadConfig() *Config {
 
 	repos := loadRepos(filepath.Join(baseDir, "repos.conf"))
 
+	// Set default command prefix if not configured
+	commandPrefix := os.Getenv("COMMAND_PREFIX")
+	if commandPrefix == "" {
+		commandPrefix = "@claude"
+	}
+
 	return &Config{
 		WebhookSecret:  secret,
 		AllowedUsers:   allowed,
@@ -391,6 +398,7 @@ func loadConfig() *Config {
 		BotGitHubToken: os.Getenv("BOT_GITHUB_TOKEN"),
 		BotGitName:      os.Getenv("BOT_GIT_NAME"),
 		BotGitEmail:     os.Getenv("BOT_GIT_EMAIL"),
+		CommandPrefix:   commandPrefix,
 		Port:           port,
 		repos:          repos,
 		BaseDir:        baseDir,
@@ -671,23 +679,24 @@ func runPlan(cfg *Config, repo, repoDir string, num int, title, issueBody string
 		planText = planText[idx:]
 	}
 
-	examples := `
-@claude approve
-@claude approve --auto-merge
-@claude approve --polish
-@claude approve [extra guidance]
-@claude plan (re-generate this plan)
-@claude <follow-up question>
+	prefix := cfg.CommandPrefix
+	examples := fmt.Sprintf(`
+%s approve
+%s approve --auto-merge
+%s approve --polish
+%s approve [extra guidance]
+%s plan (re-generate this plan)
+%s <follow-up question>
 
 **Flags:**
 - --auto-merge: Enable auto-merge after PR creation
 - --polish: Run code review and refinement before creating PR
 
 **Examples:**
-- @claude approve focus on error handling
-- @claude approve add tests for edge cases
-- @claude approve use TypeScript strict mode
-`
+- %s approve focus on error handling
+- %s approve add tests for edge cases
+- %s approve use TypeScript strict mode
+`, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix)
 	body := fmt.Sprintf(planCommentTemplate, planText, examples+formatMetadataFooter(result))
 	updateComment(body)
 	setIssueLabel(cfg, repo, repoDir, num, "planned")
@@ -714,11 +723,12 @@ func classifyComment(cfg *Config, repo, sender, senderType, body string) string 
 	firstLine := strings.ToLower(strings.SplitN(trimmed, "\n", 2)[0])
 	firstLine = strings.TrimSpace(firstLine)
 
-	if !strings.HasPrefix(firstLine, "@claude") {
+	prefix := strings.ToLower(cfg.CommandPrefix)
+	if !strings.HasPrefix(firstLine, prefix) {
 		return "skip-no-prefix"
 	}
 
-	cmd := strings.TrimSpace(strings.TrimPrefix(firstLine, "@claude"))
+	cmd := strings.TrimSpace(strings.TrimPrefix(firstLine, prefix))
 
 	switch {
 	case cmd == "approve" || cmd == "approved" || cmd == "lgtm":
