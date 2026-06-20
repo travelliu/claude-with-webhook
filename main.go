@@ -224,7 +224,7 @@ const (
 
 ---
 
-Comment **@claude** to interact:
+Comment **%s** to interact:
 
 %s`
 )
@@ -697,7 +697,7 @@ func runPlan(cfg *Config, repo, repoDir string, num int, title, issueBody string
 - %s approve add tests for edge cases
 - %s approve use TypeScript strict mode
 `, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix)
-	body := fmt.Sprintf(planCommentTemplate, planText, examples+formatMetadataFooter(result))
+	body := fmt.Sprintf(planCommentTemplate, planText, prefix, examples+formatMetadataFooter(result))
 	updateComment(body)
 	setIssueLabel(cfg, repo, repoDir, num, "planned")
 }
@@ -759,10 +759,10 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 		log.Printf("[%s#%d] skipping non-allowed user %s", repo, num, p.Comment.User.Login)
 		return
 	case "skip-no-prefix":
-		log.Printf("[%s#%d] ignoring comment without @claude prefix: %s", repo, num, truncateLog(p.Comment.Body, 2))
+		log.Printf("[%s#%d] ignoring comment without %s prefix: %s", repo, num, cfg.CommandPrefix, truncateLog(p.Comment.Body, 2))
 		return
 	case "skip-bare-mention":
-		log.Printf("[%s#%d] ignoring bare @claude mention", repo, num)
+		log.Printf("[%s#%d] ignoring bare %s mention", repo, num, cfg.CommandPrefix)
 		return
 	}
 
@@ -770,7 +770,8 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 	reactToComment(cfg, repo, repoDir, p.Comment.ID)
 
 	body := strings.TrimSpace(p.Comment.Body)
-	cmd := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(strings.SplitN(body, "\n", 2)[0]), "@claude"))
+	prefix := strings.ToLower(cfg.CommandPrefix)
+	cmd := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(strings.SplitN(body, "\n", 2)[0]), prefix))
 
 	// Determine extra guidance and flags for approve commands.
 	extra := ""
@@ -789,7 +790,7 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 			autoMerge = true
 			extra = strings.TrimSpace(strings.ReplaceAll(extra, "--auto-merge", ""))
 		}
-		// Also check the first line for --auto-merge (e.g. "@claude approve --auto-merge").
+		// Also check the first line for --auto-merge (e.g. "@bliu-coder approve --auto-merge").
 		if strings.Contains(cmd, "--auto-merge") {
 			autoMerge = true
 		}
@@ -798,7 +799,7 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 			polish = true
 			extra = strings.TrimSpace(strings.ReplaceAll(extra, "--polish", ""))
 		}
-		// Also check the first line for --polish (e.g. "@claude approve --polish").
+		// Also check the first line for --polish (e.g. "@bliu-coder approve --polish").
 		if strings.Contains(cmd, "--polish") {
 			polish = true
 		}
