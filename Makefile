@@ -12,15 +12,19 @@ install: build
 	@mkdir -p $(INSTALL)
 	@cp claude-webhook-server $(INSTALL)/
 	@echo "$(CURDIR)" > $(INSTALL)/source-repo
-	@# Install scripts
-	@cp scripts/register $(INSTALL)/register
-	@cp scripts/status $(INSTALL)/status
-	@chmod +x $(INSTALL)/register $(INSTALL)/status
-	@# Install start/stop scripts
-	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\ncd "$$DIR"\nexec ./claude-webhook-server "$$@"\n' > $(INSTALL)/start
+	@# Install CLI wrapper scripts
+	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/cwh
+	@chmod +x $(INSTALL)/cwh
+	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/start
 	@chmod +x $(INSTALL)/start
-	@printf '#!/usr/bin/env bash\npkill -f claude-webhook-server 2>/dev/null && echo "Server stopped." || echo "Server not running."\n' > $(INSTALL)/stop
+	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/stop
 	@chmod +x $(INSTALL)/stop
+	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/restart
+	@chmod +x $(INSTALL)/restart
+	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/status
+	@chmod +x $(INSTALL)/status
+	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/register
+	@chmod +x $(INSTALL)/register
 	@# Generate .env if missing
 	@if [ ! -f $(INSTALL)/.env ]; then \
 		SECRET=$$(openssl rand -hex 20); \
@@ -31,8 +35,10 @@ install: build
 	@echo
 	@echo "Installed $(VERSION) → $(INSTALL)/claude-webhook-server"
 	@echo
+	@echo "  CLI:       $(INSTALL)/cwh [command]"
 	@echo "  Start:     $(INSTALL)/start"
 	@echo "  Stop:      $(INSTALL)/stop"
+	@echo "  Restart:   $(INSTALL)/restart"
 	@echo "  Status:    $(INSTALL)/status"
 	@echo "  Register:  cd /path/to/repo && $(INSTALL)/register"
 	@echo

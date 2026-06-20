@@ -13,8 +13,12 @@ The shell scripts (`start.sh`, `stop.sh`, `restart.sh`, `status.sh`, `register.s
 | `~/.claude-webhook/start` | `claude-webhook-server start` | ✅ Implemented |
 | `~/.claude-webhook/stop` | `claude-webhook-server stop` | ✅ Implemented |
 | `~/.claude-webhook/restart` | `claude-webhook-server restart` | ✅ Implemented |
-| `~/.claude-webhook/status` | `claude-webhook-server status` | 🔄 Placeholder |
-| `~/.claude-webhook/register` | `claude-webhook-server register` | 🔄 Placeholder |
+| `~/.claude-webhook/status` | `claude-webhook-server status` | ✅ Placeholder |
+| `~/.claude-webhook/register` | `claude-webhook-server register` | ✅ Framework |
+| `scripts/register` | N/A | ✅ Removed |
+| `scripts/status` | N/A | ✅ Removed |
+
+**Note:** Old shell scripts (`scripts/register`, `scripts/status`) have been removed and replaced with Go commands.
 
 ## What's New
 
@@ -175,14 +179,13 @@ go build -o claude-webhook-server .
 
 ## Rollback
 
-If you encounter issues with the new CLI, you can temporarily use the old shell scripts:
+If you encounter issues with the new CLI, you can temporarily use the old shell scripts.
 
-```bash
-~/.claude-webhook/start.sh    # Old start script
-~/.claude-webhook/stop.sh     # Old stop script
-```
+**However, the old scripts have been removed in this release:**
+- `scripts/register` - Removed, replaced by `claude-webhook-server register`
+- `scripts/status` - Removed, replaced by `claude-webhook-server status`
 
-However, the shell scripts will be deprecated in a future release.
+The migration is complete. All users should use the new Go CLI commands.
 
 ## Feedback
 
