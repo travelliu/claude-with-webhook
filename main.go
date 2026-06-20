@@ -27,7 +27,10 @@ import (
 type Config struct {
 	WebhookSecret string
 	AllowedUsers  map[string]bool
-	BotUsername    string // GitHub username the bot posts as; its own comments are ignored
+	BotUsername    string   // GitHub username the bot posts as; its own comments are ignored
+	BotGitHubToken string   // GitHub token for gh CLI operations (optional, defaults to gh auth)
+	BotGitName     string   // Git author name for commits (optional)
+	BotGitEmail    string   // Git author email for commits (optional)
 	Port          string
 	BaseDir       string // directory where server lives (~/.claude-webhook)
 
@@ -68,7 +71,7 @@ func (c *Config) isUserAllowed(repo, username string) bool {
 	if !ok {
 		return false
 	}
-	output, err := runCmd(repoDir, gitTimeout, "gh", "api",
+	output, err := runCmdWithToken(repoDir, gitTimeout, c.BotGitHubToken, "gh", "api",
 		fmt.Sprintf("repos/%s/collaborators/%s/permission", repo, username),
 		"--jq", ".permission")
 	if err != nil {
@@ -370,12 +373,15 @@ func loadConfig() *Config {
 	repos := loadRepos(filepath.Join(baseDir, "repos.conf"))
 
 	return &Config{
-		WebhookSecret: secret,
-		AllowedUsers:  allowed,
-		BotUsername:    os.Getenv("BOT_USERNAME"),
-		Port:          port,
-		repos:         repos,
-		BaseDir:       baseDir,
+		WebhookSecret:  secret,
+		AllowedUsers:   allowed,
+		BotUsername:     os.Getenv("BOT_USERNAME"),
+		BotGitHubToken: os.Getenv("BOT_GITHUB_TOKEN"),
+		BotGitName:      os.Getenv("BOT_GIT_NAME"),
+		BotGitEmail:     os.Getenv("BOT_GIT_EMAIL"),
+		Port:           port,
+		repos:          repos,
+		BaseDir:        baseDir,
 	}
 }
 
@@ -607,8 +613,8 @@ func handleIssueOpened(cfg *Config, repo, repoDir string, num int, p webhookPayl
 		return
 	}
 
-	reactToIssue(repo, repoDir, num)
-	runPlan(repo, repoDir, num, p.Issue.Title, p.Issue.Body)
+	reactToIssue(cfg, repo, repoDir, num)
+	runPlan(cfg, repo, repoDir, num, p.Issue.Title, p.Issue.Body)
 }
 
 // handlePlan re-triggers planning from a comment (e.g. when the initial webhook was missed).
@@ -616,26 +622,26 @@ func handlePlan(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
 	log.Printf("[%s] re-planning issue #%d via comment", repo, num)
 
 	// Fetch issue title and body since the comment payload doesn't include them.
-	title, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--json", "title,body", "--jq", ".title")
+	title, err := runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--json", "title,body", "--jq", ".title")
 	if err != nil {
-		commentError(repo, repoDir, num, "Failed to fetch issue details", err)
+		commentError(cfg, repo, repoDir, num, "Failed to fetch issue details", err)
 		return
 	}
-	body, err := runCmd(repoDir, gitTimeout, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--json", "body", "--jq", ".body")
+	body, err := runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--json", "body", "--jq", ".body")
 	if err != nil {
-		commentError(repo, repoDir, num, "Failed to fetch issue details", err)
+		commentError(cfg, repo, repoDir, num, "Failed to fetch issue details", err)
 		return
 	}
 
-	runPlan(repo, repoDir, num, strings.TrimSpace(title), strings.TrimSpace(body))
+	runPlan(cfg, repo, repoDir, num, strings.TrimSpace(title), strings.TrimSpace(body))
 }
 
 // runPlan generates a Claude plan for an issue and posts it as a comment.
-func runPlan(repo, repoDir string, num int, title, issueBody string) {
+func runPlan(cfg *Config, repo, repoDir string, num int, title, issueBody string) {
 	log.Printf("[%s] planning for issue #%d: %s", repo, num, title)
-	setIssueLabel(repo, repoDir, num, "planning")
+	setIssueLabel(cfg, repo, repoDir, num, "planning")
 
-	updateComment, _ := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Planning…\n\n%s", spinnerImg))
+	updateComment, _ := postProgressComment(cfg, repo, repoDir, num, fmt.Sprintf("🤖 Planning…\n\n%s", spinnerImg))
 
 	prompt := fmt.Sprintf("## Task: Plan Implementation\n\nAnalyze the GitHub issue below and produce a clear, actionable implementation plan. Include:\n- Files to create or modify\n- Key changes in each file\n- Edge cases to handle\n- Testing approach\n\nDo NOT implement — only plan.\n\n### Issue Title\n%s\n\n### Issue Body\n%s", title, issueBody)
 	log.Printf("[%s#%d] claude started: planning", repo, num)
@@ -655,7 +661,7 @@ func runPlan(repo, repoDir string, num int, title, issueBody string) {
 
 	body := fmt.Sprintf("## Claude's Plan\n\n> Running with elevated permissions in isolated worktree\n\n%s\n\n---\n\nComment **@claude** to interact:\n\n```\n@claude approve\n@claude approve --auto-merge\n@claude approve focus on error handling and add tests\n@claude approve --auto-merge 請用繁體中文寫註解\n@claude plan (re-generate this plan)\n@claude <follow-up question>\n```%s", planText, formatMetadataFooter(result))
 	updateComment(body)
-	setIssueLabel(repo, repoDir, num, "planned")
+	setIssueLabel(cfg, repo, repoDir, num, "planned")
 }
 
 // classifyComment determines what action to take on a comment.
@@ -722,7 +728,7 @@ func handleIssueComment(cfg *Config, repo, repoDir string, num int, p webhookPay
 	}
 
 	// Acknowledge the comment with 👀.
-	reactToComment(repo, repoDir, p.Comment.ID)
+	reactToComment(cfg, repo, repoDir, p.Comment.ID)
 
 	body := strings.TrimSpace(p.Comment.Body)
 	cmd := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(strings.SplitN(body, "\n", 2)[0]), "@claude"))
@@ -829,18 +835,18 @@ type ghComment struct {
 // fetchDiscussion fetches an issue or PR body + comments, filtering out bot noise.
 // kind is "issue" or "pr". Bot comments that are just progress/error noise are removed,
 // but plan comments are kept.
-func fetchDiscussion(repoDir, repo string, num int, kind string, botUsername string) (string, error) {
+func fetchDiscussion(cfg *Config, repoDir, repo string, num int, kind string, botUsername string) (string, error) {
 	numStr := strconv.Itoa(num)
 
 	// Get title + body via gh CLI (works for both issues and PRs).
 	var titleBody string
 	var err error
 	if kind == "pr" {
-		titleBody, err = runCmd(repoDir, gitTimeout, "gh", "pr", "view", numStr,
+		titleBody, err = runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "pr", "view", numStr,
 			"--repo", repo, "--json", "title,body",
 			"--jq", `"# " + .title + "\n\n" + (.body // "")`)
 	} else {
-		titleBody, err = runCmd(repoDir, gitTimeout, "gh", "issue", "view", numStr,
+		titleBody, err = runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "issue", "view", numStr,
 			"--repo", repo, "--json", "title,body",
 			"--jq", `"# " + .title + "\n\n" + (.body // "")`)
 	}
@@ -849,25 +855,25 @@ func fetchDiscussion(repoDir, repo string, num int, kind string, botUsername str
 	}
 
 	// Get comments via API (issues API works for both issues and PRs).
-	commentsRaw, err := runCmd(repoDir, gitTimeout, "gh", "api",
+	commentsRaw, err := runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "api",
 		fmt.Sprintf("repos/%s/issues/%d/comments", repo, num),
 		"--paginate")
 	if err != nil {
 		// Fallback to unfiltered gh view if API fails.
 		log.Printf("fetchDiscussion: API fallback for %s #%d: %v", repo, num, err)
 		if kind == "pr" {
-			return runCmd(repoDir, gitTimeout, "gh", "pr", "view", numStr, "--repo", repo, "--comments")
+			return runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "pr", "view", numStr, "--repo", repo, "--comments")
 		}
-		return runCmd(repoDir, gitTimeout, "gh", "issue", "view", numStr, "--repo", repo, "--comments")
+		return runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "issue", "view", numStr, "--repo", repo, "--comments")
 	}
 
 	var comments []ghComment
 	if err := json.Unmarshal([]byte(commentsRaw), &comments); err != nil {
 		log.Printf("fetchDiscussion: JSON parse fallback for %s #%d: %v", repo, num, err)
 		if kind == "pr" {
-			return runCmd(repoDir, gitTimeout, "gh", "pr", "view", numStr, "--repo", repo, "--comments")
+			return runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "pr", "view", numStr, "--repo", repo, "--comments")
 		}
-		return runCmd(repoDir, gitTimeout, "gh", "issue", "view", numStr, "--repo", repo, "--comments")
+		return runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "issue", "view", numStr, "--repo", repo, "--comments")
 	}
 
 	var filtered []string
@@ -899,9 +905,9 @@ func truncateLog(s string, maxLines int) string {
 func handleFollowUp(cfg *Config, repo, repoDir string, num int, p webhookPayload) {
 	log.Printf("[%s] follow-up on issue #%d", repo, num)
 
-	updateComment, _ := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Thinking…\n\n%s", spinnerImg))
+	updateComment, _ := postProgressComment(cfg, repo, repoDir, num, fmt.Sprintf("🤖 Thinking…\n\n%s", spinnerImg))
 
-	discussion, err := fetchDiscussion(repoDir, repo, num, "issue", cfg.BotUsername)
+	discussion, err := fetchDiscussion(cfg, repoDir, repo, num, "issue", cfg.BotUsername)
 	if err != nil {
 		updateComment(formatError("Failed to read issue discussion", err))
 		return
@@ -985,8 +991,8 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		return
 	}
 
-	setIssueLabel(repo, repoDir, num, "implementing")
-	updateComment, deleteSpinner := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Implementing…\n\n%s", spinnerImg))
+	setIssueLabel(cfg, repo, repoDir, num, "implementing")
+	updateComment, deleteSpinner := postProgressComment(cfg, repo, repoDir, num, fmt.Sprintf("🤖 Implementing…\n\n%s", spinnerImg))
 
 	if _, err := runCmd(repoDir, gitTimeout, "git", "fetch", "origin", "main"); err != nil {
 		updateComment(formatError("Failed to fetch origin/main", err))
@@ -1005,7 +1011,7 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		}
 	}()
 
-	discussion, err := fetchDiscussion(repoDir, repo, num, "issue", cfg.BotUsername)
+	discussion, err := fetchDiscussion(cfg, repoDir, repo, num, "issue", cfg.BotUsername)
 	if err != nil {
 		updateComment(formatError("Failed to read issue discussion", err))
 		return
@@ -1053,7 +1059,7 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 		updateComment(formatError("Failed to stage changes", err))
 		return
 	}
-	if _, err := runCmd(worktreeDir, gitTimeout, "git", "commit", "-m", commitMsg); err != nil {
+	if _, err := runCmdWithGitConfig(worktreeDir, gitTimeout, cfg.BotGitName, cfg.BotGitEmail, "git", "commit", "-m", commitMsg); err != nil {
 		updateComment(formatError("Failed to commit", err))
 		return
 	}
@@ -1064,7 +1070,7 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 
 	prTitle := fmt.Sprintf("Fix #%d: %s", num, title)
 	prBody := fmt.Sprintf("Closes #%d\n\nImplemented automatically by Claude.", num)
-	prURL, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "create", "--title", prTitle, "--body", prBody, "--repo", repo)
+	prURL, err := runCmdWithToken(worktreeDir, gitTimeout, cfg.BotGitHubToken, "gh", "pr", "create", "--title", prTitle, "--body", prBody, "--repo", repo)
 	if err != nil {
 		updateComment(formatError("Failed to create PR", err))
 		return
@@ -1072,24 +1078,24 @@ func handleApprove(cfg *Config, repo, repoDir string, num int, p webhookPayload,
 
 	prURL = strings.TrimSpace(prURL)
 	deleteSpinner()
-	setIssueLabel(repo, repoDir, num, "review")
+	setIssueLabel(cfg, repo, repoDir, num, "review")
 
 	// Auto-merge if requested: try direct squash merge first (no CI),
 	// fall back to --auto (CI pending).
 	if autoMerge {
-		if _, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "merge", "--squash", "--repo", repo, branch); err == nil {
+		if _, err := runCmdWithToken(worktreeDir, gitTimeout, cfg.BotGitHubToken, "gh", "pr", "merge", "--squash", "--repo", repo, branch); err == nil {
 			log.Printf("[%s#%d] PR merged directly (squash) for %s", repo, num, prURL)
-			setIssueLabel(repo, repoDir, num, "done")
-			postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created and merged: %s", prURL))
-		} else if _, err := runCmd(worktreeDir, gitTimeout, "gh", "pr", "merge", "--auto", "--squash", "--repo", repo, branch); err == nil {
+			setIssueLabel(cfg, repo, repoDir, num, "done")
+			postIssueComment(cfg, repo, repoDir, num, fmt.Sprintf("PR created and merged: %s", prURL))
+		} else if _, err := runCmdWithToken(worktreeDir, gitTimeout, cfg.BotGitHubToken, "gh", "pr", "merge", "--auto", "--squash", "--repo", repo, branch); err == nil {
 			log.Printf("[%s#%d] auto-merge enabled for %s", repo, num, prURL)
-			postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n✅ Auto-merge enabled (will merge when CI passes)", prURL))
+			postIssueComment(cfg, repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n✅ Auto-merge enabled (will merge when CI passes)", prURL))
 		} else {
 			log.Printf("[%s#%d] auto-merge failed: %v", repo, num, err)
-			postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n⚠️ Auto-merge failed — please merge manually", prURL))
+			postIssueComment(cfg, repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n⚠️ Auto-merge failed — please merge manually", prURL))
 		}
 	} else {
-		postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s", prURL))
+		postIssueComment(cfg, repo, repoDir, num, fmt.Sprintf("PR created: %s", prURL))
 	}
 	success = true
 
@@ -1224,10 +1230,10 @@ func isLGTM(reviewText string) bool {
 func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayload, extraGuidance string) {
 	log.Printf("[%s] handling PR comment on #%d", repo, num)
 
-	updateComment, deleteSpinner := postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Implementing…\n\n%s", spinnerImg))
+	updateComment, deleteSpinner := postProgressComment(cfg, repo, repoDir, num, fmt.Sprintf("🤖 Implementing…\n\n%s", spinnerImg))
 
 	// Get the PR's head branch name.
-	branch, err := runCmd(repoDir, gitTimeout, "gh", "pr", "view", strconv.Itoa(num),
+	branch, err := runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "pr", "view", strconv.Itoa(num),
 		"--repo", repo, "--json", "headRefName", "--jq", ".headRefName")
 	if err != nil {
 		updateComment(formatError("Failed to get PR branch name", err))
@@ -1260,7 +1266,7 @@ func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayloa
 	}()
 
 	// Read the full PR discussion, filtering out bot noise.
-	discussion, err := fetchDiscussion(repoDir, repo, num, "pr", cfg.BotUsername)
+	discussion, err := fetchDiscussion(cfg, repoDir, repo, num, "pr", cfg.BotUsername)
 	if err != nil {
 		updateComment(formatError("Failed to read PR discussion", err))
 		return
@@ -1302,7 +1308,7 @@ func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayloa
 		updateComment(formatError("Failed to stage changes", err))
 		return
 	}
-	if _, err := runCmd(worktreeDir, gitTimeout, "git", "commit", "-m", commitMsg); err != nil {
+	if _, err := runCmdWithGitConfig(worktreeDir, gitTimeout, cfg.BotGitName, cfg.BotGitEmail, "git", "commit", "-m", commitMsg); err != nil {
 		updateComment(formatError("Failed to commit", err))
 		return
 	}
@@ -1312,7 +1318,7 @@ func handlePRComment(cfg *Config, repo, repoDir string, num int, p webhookPayloa
 	}
 
 	deleteSpinner()
-	postIssueComment(repo, repoDir, num, fmt.Sprintf("Changes pushed to `%s`.", branch))
+	postIssueComment(cfg, repo, repoDir, num, fmt.Sprintf("Changes pushed to `%s`.", branch))
 	log.Printf("[%s] pushed PR changes for #%d to branch %s", repo, num, branch)
 }
 
@@ -1324,6 +1330,82 @@ func runCmdWithStdin(dir string, timeout time.Duration, stdin string, name strin
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(stdin)
+	start := time.Now()
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	label := name
+	if len(args) > 0 {
+		label += " " + args[0]
+	}
+
+	if ctx.Err() == context.DeadlineExceeded {
+		log.Printf("TIMEOUT: %s after %s", label, timeout)
+		return string(out), fmt.Errorf("%s %s: timed out after %s", name, strings.Join(args, " "), timeout)
+	}
+	if err != nil {
+		log.Printf("FAIL: %s (%s)", label, elapsed.Round(time.Millisecond))
+		return string(out), fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, out)
+	}
+	if elapsed > 5*time.Second {
+		log.Printf("  %s done (%s)", label, elapsed.Round(time.Millisecond))
+	}
+	return string(out), nil
+}
+
+// runCmdWithToken executes a command with a custom GITHUB_TOKEN env var.
+// This allows gh CLI commands to run with a different GitHub account than the default gh auth.
+func runCmdWithToken(dir string, timeout time.Duration, token string, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	if token != "" {
+		cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+token)
+	}
+	start := time.Now()
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	label := name
+	if len(args) > 0 {
+		label += " " + args[0]
+	}
+
+	if ctx.Err() == context.DeadlineExceeded {
+		log.Printf("TIMEOUT: %s after %s", label, timeout)
+		return string(out), fmt.Errorf("%s %s: timed out after %s", name, strings.Join(args, " "), timeout)
+	}
+	if err != nil {
+		log.Printf("FAIL: %s (%s)", label, elapsed.Round(time.Millisecond))
+		return string(out), fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, out)
+	}
+	if elapsed > 5*time.Second {
+		log.Printf("  %s done (%s)", label, elapsed.Round(time.Millisecond))
+	}
+	return string(out), nil
+}
+
+// runCmdWithGitConfig executes a git command with custom author/committer identity.
+// This allows commits to be made with the bot's identity instead of the global git config.
+func runCmdWithGitConfig(dir string, timeout time.Duration, gitName, gitEmail string, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	// Set git author and committer environment variables
+	env := os.Environ()
+	if gitName != "" {
+		env = append(env, "GIT_AUTHOR_NAME="+gitName)
+		env = append(env, "GIT_COMMITTER_NAME="+gitName)
+	}
+	if gitEmail != "" {
+		env = append(env, "GIT_AUTHOR_EMAIL="+gitEmail)
+		env = append(env, "GIT_COMMITTER_EMAIL="+gitEmail)
+	}
+	cmd.Env = env
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
@@ -1541,8 +1623,8 @@ func verifySignature(payload []byte, header, secret string) bool {
 }
 
 // postIssueComment posts a comment on a GitHub issue using gh CLI.
-func postIssueComment(repo, repoDir string, num int, body string) error {
-	_, err := runCmd(repoDir, gitTimeout, "gh", "issue", "comment", strconv.Itoa(num), "--repo", repo, "--body", body)
+func postIssueComment(cfg *Config, repo, repoDir string, num int, body string) error {
+	_, err := runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "issue", "comment", strconv.Itoa(num), "--repo", repo, "--body", body)
 	return err
 }
 
@@ -1550,9 +1632,9 @@ func postIssueComment(repo, repoDir string, num int, body string) error {
 // update function (to replace the comment body) and a delete function (to
 // remove the comment entirely). If the placeholder fails, delete is a no-op
 // and the updater falls back to posting a new comment.
-func postProgressComment(repo, repoDir string, num int, placeholder string) (update func(string), delete func()) {
+func postProgressComment(cfg *Config, repo, repoDir string, num int, placeholder string) (update func(string), delete func()) {
 	// Create the placeholder comment and capture its ID.
-	out, err := runCmd(repoDir, gitTimeout, "gh", "api",
+	out, err := runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "api",
 		fmt.Sprintf("repos/%s/issues/%d/comments", repo, num),
 		"-X", "POST",
 		"-f", "body="+placeholder,
@@ -1561,7 +1643,7 @@ func postProgressComment(repo, repoDir string, num int, placeholder string) (upd
 		log.Printf("[%s#%d] failed to post progress comment: %v", repo, num, err)
 		// Return a fallback updater and no-op deleter.
 		return func(body string) {
-			postIssueComment(repo, repoDir, num, body)
+			postIssueComment(cfg, repo, repoDir, num, body)
 		}, func() {}
 	}
 
@@ -1571,22 +1653,22 @@ func postProgressComment(repo, repoDir string, num int, placeholder string) (upd
 	update = func(body string) {
 		// Use --input - to pass body via stdin, avoiding shell escaping issues with multiline content.
 		jsonBody, _ := json.Marshal(map[string]string{"body": body})
-		_, err := runCmdWithStdin(repoDir, gitTimeout, string(jsonBody), "gh", "api",
+		_, err := runCmdWithStdin(repoDir, gitTimeout, cfg.BotGitHubToken, string(jsonBody), "gh", "api",
 			fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
 			"-X", "PATCH",
 			"--input", "-")
 		if err != nil {
 			log.Printf("[%s#%d] failed to update comment %s, posting new: %v", repo, num, commentID, err)
 			// Delete the stale placeholder to avoid duplicates.
-			runCmd(repoDir, gitTimeout, "gh", "api",
+			runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "api",
 				fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
 				"-X", "DELETE")
-			postIssueComment(repo, repoDir, num, body)
+			postIssueComment(cfg, repo, repoDir, num, body)
 		}
 	}
 
 	delete = func() {
-		_, err := runCmd(repoDir, gitTimeout, "gh", "api",
+		_, err := runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "api",
 			fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
 			"-X", "DELETE")
 		if err != nil {
@@ -1599,14 +1681,14 @@ func postProgressComment(repo, repoDir string, num int, placeholder string) (upd
 
 // setIssueLabel sets the workflow label on an issue, removing any previous workflow labels.
 // Labels: planning, planned, implementing, review, done.
-func setIssueLabel(repo, repoDir string, num int, label string) {
+func setIssueLabel(cfg *Config, repo, repoDir string, num int, label string) {
 	workflowLabels := map[string]bool{
 		"planning": true, "planned": true, "implementing": true, "review": true, "done": true,
 	}
 
 	// Fetch current labels on the issue.
 	endpoint := fmt.Sprintf("repos/%s/issues/%d/labels", repo, num)
-	out, err := runCmd(repoDir, gitTimeout, "gh", "api", endpoint, "--jq", ".[].name")
+	out, err := runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "api", endpoint, "--jq", ".[].name")
 	if err == nil {
 		for _, existing := range strings.Split(strings.TrimSpace(out), "\n") {
 			existing = strings.TrimSpace(existing)
@@ -1618,34 +1700,34 @@ func setIssueLabel(repo, repoDir string, num int, label string) {
 	}
 
 	// Add the new label (creates it if it doesn't exist).
-	_, err = runCmd(repoDir, gitTimeout, "gh", "api", endpoint, "-f", fmt.Sprintf("labels[]=%s", label))
+	_, err = runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "api", endpoint, "-f", fmt.Sprintf("labels[]=%s", label))
 	if err != nil {
 		log.Printf("[%s#%d] failed to set label %q: %v", repo, num, label, err)
 	}
 }
 
 // reactToIssue adds an 👀 emoji reaction to an issue.
-func reactToIssue(repo, repoDir string, num int) {
+func reactToIssue(cfg *Config, repo, repoDir string, num int) {
 	endpoint := fmt.Sprintf("repos/%s/issues/%d/reactions", repo, num)
-	_, err := runCmd(repoDir, gitTimeout, "gh", "api", endpoint, "-f", "content=eyes")
+	_, err := runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "api", endpoint, "-f", "content=eyes")
 	if err != nil {
 		log.Printf("failed to react to issue #%d: %v", num, err)
 	}
 }
 
 // reactToComment adds an 👀 emoji reaction to a comment.
-func reactToComment(repo, repoDir string, commentID int) {
+func reactToComment(cfg *Config, repo, repoDir string, commentID int) {
 	endpoint := fmt.Sprintf("repos/%s/issues/comments/%d/reactions", repo, commentID)
-	_, err := runCmd(repoDir, gitTimeout, "gh", "api", endpoint, "-f", "content=eyes")
+	_, err := runCmdWithToken(repoDir, gitTimeout, cfg.BotGitHubToken, "gh", "api", endpoint, "-f", "content=eyes")
 	if err != nil {
 		log.Printf("failed to react to comment %d: %v", commentID, err)
 	}
 }
 
 // commentError posts a sanitized error message on the issue.
-func commentError(repo, repoDir string, num int, msg string, err error) {
+func commentError(cfg *Config, repo, repoDir string, num int, msg string, err error) {
 	log.Printf("error on %s#%d: %s: %v", repo, num, msg, err)
-	postIssueComment(repo, repoDir, num, formatError(msg, err))
+	postIssueComment(cfg, repo, repoDir, num, formatError(msg, err))
 }
 
 // formatError creates a sanitized error message for GitHub comments.
