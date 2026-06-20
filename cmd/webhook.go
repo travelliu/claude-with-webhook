@@ -144,10 +144,18 @@ func CheckAndUpdateWebhooks(cfg *Config) error {
 }
 
 // checkAndUpdateRepoWebhook checks a single repo's webhook and updates if needed
+// IMPORTANT: Uses administrator's gh authentication, NOT bot token
+// Webhook management requires admin permissions which the bot may not have
 func checkAndUpdateRepoWebhook(repo, currentURL, secret string) error {
-	// Get all webhooks for the repo
-	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/hooks", repo),
-		"--jq", ".[] | select(.config.url | endswith(\"/webhook\")) | {id: .id, url: .config.url}").Output()
+	// Create clean environment without BOT_GITHUB_TOKEN
+	cleanEnv := cleanEnvForAdminAuth()
+
+	// Get all webhooks for the repo using admin auth
+	cmd := exec.Command("gh", "api", fmt.Sprintf("repos/%s/hooks", repo),
+		"--jq", ".[] | select(.config.url | endswith(\"/webhook\")) | {id: .id, url: .config.url}")
+	cmd.Env = cleanEnv
+
+	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to get webhooks: %w", err)
 	}
@@ -179,7 +187,7 @@ func checkAndUpdateRepoWebhook(repo, currentURL, secret string) error {
 	log.Printf("  Old: %s", existingWebhook.URL)
 	log.Printf("  New: %s", expectedURL)
 
-	// Update webhook
+	// Update webhook using administrator's gh authentication
 	updateCmd := exec.Command("gh", "api", fmt.Sprintf("repos/%s/hooks/%d", repo, existingWebhook.ID),
 		"--method", "PATCH",
 		"-f", fmt.Sprintf("config[url]=%s", expectedURL),
@@ -187,10 +195,30 @@ func checkAndUpdateRepoWebhook(repo, currentURL, secret string) error {
 		"-f", fmt.Sprintf("config[secret]=%s", secret),
 		"-F", "active=true")
 
+	// Use clean environment for admin auth
+	updateCmd.Env = cleanEnv
+
 	if output, err := updateCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to update webhook: %w, output: %s", err, string(output))
 	}
 
 	log.Printf("[%s] webhook updated successfully", repo)
 	return nil
+}
+
+// cleanEnvForAdminAuth creates a clean environment for administrator authentication
+// Removes BOT_GITHUB_TOKEN and GITHUB_TOKEN to ensure gh uses default admin authentication
+func cleanEnvForAdminAuth() []string {
+	env := os.Environ()
+	cleanEnv := make([]string, 0, len(env))
+
+	for _, e := range env {
+		// Skip BOT_GITHUB_TOKEN and GITHUB_TOKEN to use default gh auth
+		if !strings.HasPrefix(e, "BOT_GITHUB_TOKEN=") &&
+		   !strings.HasPrefix(e, "GITHUB_TOKEN=") {
+			cleanEnv = append(cleanEnv, e)
+		}
+	}
+
+	return cleanEnv
 }

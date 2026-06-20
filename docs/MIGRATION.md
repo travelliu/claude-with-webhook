@@ -132,6 +132,13 @@ When the server starts, it automatically checks and updates GitHub webhooks if t
 2. Checks all registered repos' GitHub webhooks
 3. Updates webhooks if URL mismatch detected
 4. Requires `gh` CLI with `admin:repo_hook` scope
+5. **Uses administrator's gh authentication** (not bot token)
+
+**Important - Authentication:**
+- Webhook updates use the administrator's `gh` authentication
+- `BOT_GITHUB_TOKEN` is **NOT** used for webhook updates
+- Webhook management requires admin permissions which the bot may not have
+- This ensures webhook updates work even when bot is only a collaborator
 
 **Supported tunnels:**
 - **Tailscale Funnel** — Stable URLs, rarely needs update
