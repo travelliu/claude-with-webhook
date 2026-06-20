@@ -15,13 +15,8 @@ var restartCmd = &cobra.Command{
 }
 
 func init() {
-	addRestartCommand()
 	restartCmd.Flags().StringP("port", "p", "", "Server port (overrides .env PORT)")
 	restartCmd.Flags().IntP("max-concurrent", "j", 0, "Max concurrent jobs (overrides .env MAX_CONCURRENT)")
-}
-
-func addRestartCommand() {
-	rootCmd.AddCommand(restartCmd)
 }
 
 func runRestart(cmd *cobra.Command, args []string) error {

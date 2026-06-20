@@ -18,11 +18,7 @@ var stopCmd = &cobra.Command{
 }
 
 func init() {
-	addStopCommand()
-}
-
-func addStopCommand() {
-	rootCmd.AddCommand(stopCmd)
+	// Registered by daemon.go
 }
 
 func runStop(cmd *cobra.Command, args []string) error {

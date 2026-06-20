@@ -3,17 +3,22 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"claude-with-webhook/pkg/agent"
 	"claude-with-webhook/pkg/github"
+	pkglog "claude-with-webhook/pkg/logger"
 	"claude-with-webhook/pkg/tunnel"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Server represents the webhook server
@@ -22,49 +27,89 @@ type Server struct {
 	httpServer      *http.Server
 	githubClient    *github.Client
 	tunnelManager   *tunnel.Manager
+	agentRegistry   *agent.ProviderRegistry
+	bots            []BotConfig
 	semaphore       chan struct{}
-	deliveryCache   *DeliveryCache
+	deliveryCache   sync.Map // X-GitHub-Delivery UUID -> time.Time (dedup)
+	issueMu         sync.Map // per-issue mutex keyed by "repo#number"
+	log             *slog.Logger
 }
 
 // Config holds server configuration
+// RepoConfig holds per-repo configuration.
+type RepoConfig struct {
+	Dir          string   `yaml:"dir"`
+	DefaultBot   string   `yaml:"default_bot,omitempty"`    // bot name when no @mention
+	AllowedUsers []string `yaml:"allowed_users,omitempty"`
+	WebhookToken string   `yaml:"webhook_token,omitempty"` // token with admin:repo_hook scope
+}
+
 type Config struct {
 	WebhookSecret  string
-	AllowedUsers   map[string]bool
-	BotUsername    string
-	BotGitHubToken string
-	BotGitName     string
-	BotGitEmail    string
-	CommandPrefix  string
+	AllowedUsers   map[string]bool // global fallback
+	BotUsername    string          // legacy single-bot env var
+	BotGitHubToken string          // legacy single-bot env var
+	BotGitName     string          // legacy single-bot env var
+	BotGitEmail    string          // legacy single-bot env var
+	CommandPrefix  string          // legacy single-bot env var
 	Port           string
 	BaseDir        string
 	PublicURL      string // User-provided public URL (skip tunnel)
 
 	reposMu sync.RWMutex
-	repos   map[string]string
-}
-
-// DeliveryCache tracks webhook delivery IDs to prevent duplicates
-type DeliveryCache struct {
-	mu   sync.Mutex
-	data map[string]time.Time
+	repos   map[string]RepoConfig
 }
 
 // New creates a new server instance
 func New(cfg *Config) *Server {
-	return &Server{
-		config: cfg,
-		githubClient: github.NewClient(),
+	s := &Server{
+		config:        cfg,
+		log:           pkglog.New("server"),
+		githubClient:  github.NewClient(),
 		tunnelManager: tunnel.NewManager(cfg.BaseDir, cfg.Port),
-		semaphore: make(chan struct{}, 3), // Default max concurrent
-		deliveryCache: &DeliveryCache{
-			data: make(map[string]time.Time),
-		},
+		agentRegistry: agent.DefaultRegistry(),
+		semaphore:     make(chan struct{}, 3),
+	}
+	s.loadBots()
+	return s
+}
+
+// loadBots loads bots from bots.yaml, falling back to env vars for backward compat.
+func (s *Server) loadBots() {
+	botsFile, err := LoadBots(s.config.BaseDir)
+	if err != nil {
+		s.log.Warn("failed to load bots.yaml", "error", err)
+	}
+	if len(botsFile.Bots) > 0 {
+		s.bots = botsFile.Bots
+		s.log.Info("loaded bots from bots.yaml", "count", len(s.bots))
+		return
+	}
+
+	// Backward compat: create default bot from env vars
+	if s.config.BotUsername != "" && s.config.BotGitHubToken != "" {
+		prefix := s.config.CommandPrefix
+		if prefix == "" {
+			prefix = "@claude"
+		}
+		s.bots = []BotConfig{
+			{
+				Name:     "default",
+				Username: s.config.BotUsername,
+				Token:    s.config.BotGitHubToken,
+				GitName:  s.config.BotGitName,
+				GitEmail: s.config.BotGitEmail,
+				Prefix:   prefix,
+				Agent:    "claude",
+			},
+		}
+		s.log.Info("created default bot from env vars", "prefix", prefix)
 	}
 }
 
 // Start starts the webhook server
 func (s *Server) Start() error {
-	log.Printf("Starting webhook server on port %s", s.config.Port)
+	s.log.Info("starting webhook server", "port", s.config.Port)
 
 	// Setup HTTP routes
 	mux := http.NewServeMux()
@@ -86,19 +131,19 @@ func (s *Server) Start() error {
 
 	// Ensure tunnel is running
 	if err := s.ensureTunnel(); err != nil {
-		log.Printf("Warning: tunnel check failed: %v", err)
+		s.log.Warn("tunnel check failed", "error", err)
 	}
 
 	// Check and update webhooks if needed
 	if err := s.checkAndUpdateWebhooks(); err != nil {
-		log.Printf("Warning: webhook check failed: %v", err)
+		s.log.Warn("webhook check failed", "error", err)
 	}
 
 	// Start server
 	go func() {
-		log.Printf("Server listening on %s", s.httpServer.Addr)
+		s.log.Info("server listening", "addr", s.httpServer.Addr)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("Server error: %v", err)
+			s.log.Error("server error", "error", err)
 		}
 	}()
 
@@ -113,7 +158,7 @@ func (s *Server) Start() error {
 func (s *Server) ensureTunnel() error {
 	// Check if user provided public URL
 	if s.config.PublicURL != "" {
-		log.Printf("Using public URL: %s (tunnel skipped)", s.config.PublicURL)
+		s.log.Info("using public URL, tunnel skipped", "url", s.config.PublicURL)
 		return nil
 	}
 
@@ -122,7 +167,7 @@ func (s *Server) ensureTunnel() error {
 	if err != nil {
 		return err
 	}
-	log.Printf("Tunnel URL: %s", url)
+	s.log.Info("tunnel URL", "url", url)
 	return nil
 }
 
@@ -132,20 +177,20 @@ func (s *Server) checkAndUpdateWebhooks() error {
 	var baseURL string
 	if s.config.PublicURL != "" {
 		baseURL = s.config.PublicURL
-		log.Printf("Using configured public URL: %s", baseURL)
+		s.log.Info("using configured public URL", "url", baseURL)
 	} else {
 		tunnelURL, err := s.tunnelManager.GetURL()
 		if err != nil {
 			return fmt.Errorf("get tunnel URL: %w", err)
 		}
 		baseURL = tunnelURL
-		log.Printf("Current tunnel URL: %s", baseURL)
+		s.log.Info("current tunnel URL", "url", baseURL)
 	}
 
 	repos := s.config.GetAllRepos()
 	for repo := range repos {
 		if err := s.checkAndUpdateRepoWebhook(repo, baseURL); err != nil {
-			log.Printf("[%s] webhook check failed: %v", repo, err)
+			s.log.Error("webhook check failed", "repo", repo, "error", err)
 		}
 	}
 
@@ -160,7 +205,7 @@ func (s *Server) checkAndUpdateRepoWebhook(repo, tunnelURL string) error {
 	}
 
 	if len(webhooks) == 0 {
-		log.Printf("[%s] no webhook found", repo)
+		s.log.Warn("no webhook found", "repo", repo)
 		return nil
 	}
 
@@ -168,32 +213,23 @@ func (s *Server) checkAndUpdateRepoWebhook(repo, tunnelURL string) error {
 	wh := webhooks[0] // Take first webhook
 
 	if wh.URL == expectedURL {
-		log.Printf("[%s] webhook URL is correct: %s", repo, wh.URL)
+		s.log.Info("webhook URL is correct", "repo", repo, "url", wh.URL)
 		return nil
 	}
 
 	// Update webhook
-	log.Printf("[%s] webhook URL mismatch - updating", repo)
-	log.Printf("  Old: %s", wh.URL)
-	log.Printf("  New: %s", expectedURL)
+	s.log.Warn("webhook URL mismatch, updating", "repo", repo, "old", wh.URL, "new", expectedURL)
 
 	if err := s.githubClient.UpdateWebhook(repo, wh.ID, expectedURL, s.config.WebhookSecret); err != nil {
 		return err
 	}
 
-	log.Printf("[%s] webhook updated successfully", repo)
+	s.log.Info("webhook updated successfully", "repo", repo)
 	return nil
 }
 
 // startBackgroundTasks starts background maintenance tasks
 func (s *Server) startBackgroundTasks() {
-	// Clean up old delivery IDs periodically
-	go func() {
-		for range time.Tick(10 * time.Minute) {
-			s.deliveryCache.Clean(time.Now().Add(-1 * time.Hour))
-		}
-	}()
-
 	// Reload repos.conf on SIGHUP
 	s.setupSIGHUP()
 }
@@ -204,11 +240,11 @@ func (s *Server) setupSIGHUP() {
 	signal.Notify(sighup, syscall.SIGHUP)
 	go func() {
 		for range sighup {
-			log.Println("Received SIGHUP, reloading repos.conf...")
+			s.log.Info("received SIGHUP, reloading repos.conf")
 			s.config.ReloadRepos()
 			// Re-check webhooks after reload
 			if err := s.checkAndUpdateWebhooks(); err != nil {
-				log.Printf("Warning: webhook check failed after reload: %v", err)
+				s.log.Warn("webhook check failed after reload", "error", err)
 			}
 		}
 	}()
@@ -220,56 +256,53 @@ func (s *Server) waitForShutdown() {
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
 
 	sig := <-shutdown
-	log.Printf("Received %s, shutting down...", sig)
+	s.log.Info("received signal, shutting down", "signal", sig)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		log.Printf("Server shutdown error: %v", err)
+		s.log.Error("server shutdown error", "error", err)
 	}
 
-	log.Println("Server stopped")
+	s.log.Info("server stopped")
 }
 
 // GetRepo returns the local path for a repo
 func (c *Config) GetRepo(name string) (string, bool) {
 	c.reposMu.RLock()
 	defer c.reposMu.RUnlock()
-	dir, ok := c.repos[name]
-	return dir, ok
+	rc, ok := c.repos[name]
+	return rc.Dir, ok
 }
 
-// GetAllRepos returns all registered repos
+// GetRepoConfig returns the full config for a repo
+func (c *Config) GetRepoConfig(name string) (RepoConfig, bool) {
+	c.reposMu.RLock()
+	defer c.reposMu.RUnlock()
+	rc, ok := c.repos[name]
+	return rc, ok
+}
+
+// GetAllRepos returns all registered repo dirs
 func (c *Config) GetAllRepos() map[string]string {
 	c.reposMu.RLock()
 	defer c.reposMu.RUnlock()
 	result := make(map[string]string, len(c.repos))
 	for k, v := range c.repos {
-		result[k] = v
+		result[k] = v.Dir
 	}
 	return result
 }
 
-// ReloadRepos reloads repos.conf
+// ReloadRepos reloads repos.yaml
 func (c *Config) ReloadRepos() {
 	repos := loadRepos(c.BaseDir)
 	c.reposMu.Lock()
 	c.repos = repos
 	c.reposMu.Unlock()
-	for repo, dir := range repos {
-		log.Printf("  %s → %s", repo, dir)
-	}
-}
-
-// Clean removes old entries from delivery cache
-func (d *DeliveryCache) Clean(cutoff time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for key, timestamp := range d.data {
-		if timestamp.Before(cutoff) {
-			delete(d.data, key)
-		}
+	for repo, rc := range repos {
+		slog.Info("repo loaded", "repo", repo, "dir", rc.Dir)
 	}
 }
 
@@ -290,55 +323,87 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Port: %s\n", s.config.Port)
 }
 
-func (s *Server) webhookHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: Implement webhook handling logic
-	// This will be migrated from main.go
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Webhook received (implementation pending)"))
-}
-
 // webhookCatchAllHandler handles webhook routes like /{owner}/{repo}/webhook
 func (s *Server) webhookCatchAllHandler(w http.ResponseWriter, r *http.Request) {
-	// For now, just handle root path
 	if r.URL.Path == "/" {
 		s.rootHandler(w, r)
 		return
 	}
 
-	// TODO: Parse /{owner}/{repo}/webhook route
-	// TODO: Implement webhook handling logic
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Webhook endpoint (implementation pending)"))
+	// Parse /{owner}/{repo}/webhook route
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) == 3 && parts[2] == "webhook" {
+		repo := parts[0] + "/" + parts[1]
+		s.handleWebhook(w, r, repo)
+		return
+	}
+
+	http.NotFound(w, r)
 }
 
-// loadRepos loads repos.conf from disk
-func loadRepos(baseDir string) map[string]string {
-	reposFile := fmt.Sprintf("%s/repos.conf", baseDir)
-	repos := make(map[string]string)
+// reposFileYAML is the top-level structure of repos.yaml.
+type reposFileYAML struct {
+	Repos map[string]RepoConfig `yaml:"repos"`
+}
 
-	data, err := os.ReadFile(reposFile)
+// loadRepos loads repo config from repos.yaml, falling back to repos.conf.
+func loadRepos(baseDir string) map[string]RepoConfig {
+	// Try repos.yaml first
+	yamlPath := filepath.Join(baseDir, "repos.yaml")
+	if data, err := os.ReadFile(yamlPath); err == nil {
+		var rf reposFileYAML
+		if err := yaml.Unmarshal(data, &rf); err == nil && len(rf.Repos) > 0 {
+			return rf.Repos
+		}
+	}
+
+	// Fallback to repos.conf (legacy flat format)
+	confPath := filepath.Join(baseDir, "repos.conf")
+	repos := make(map[string]RepoConfig)
+	data, err := os.ReadFile(confPath)
 	if err != nil {
 		return repos
 	}
 
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
 			repo := strings.TrimSpace(parts[0])
-			path := strings.TrimSpace(parts[1])
-			if repo != "" && path != "" {
-				repos[repo] = path
+			dir := strings.TrimSpace(parts[1])
+			if repo != "" && dir != "" {
+				repos[repo] = RepoConfig{Dir: dir}
 			}
 		}
 	}
-
 	return repos
+}
+
+// LoadRepos is the exported version of loadRepos for use by CLI commands.
+func LoadRepos(baseDir string) (map[string]RepoConfig, error) {
+	return loadRepos(baseDir), nil
+}
+
+// SaveRepos writes repos.yaml to the base directory.
+func SaveRepos(baseDir string, repos map[string]RepoConfig) error {
+	path := filepath.Join(baseDir, "repos.yaml")
+	out := struct {
+		Repos map[string]RepoConfig `yaml:"repos"`
+	}{Repos: repos}
+	data, err := yaml.Marshal(out)
+	if err != nil {
+		return fmt.Errorf("marshal repos.yaml: %w", err)
+	}
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return fmt.Errorf("create base dir: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write repos.yaml: %w", err)
+	}
+	return nil
 }
 
 // NewConfig creates a new config from environment variables
@@ -346,7 +411,7 @@ func NewConfig(baseDir string) (*Config, error) {
 	// Load .env file if exists
 	envFile := fmt.Sprintf("%s/.env", baseDir)
 	if err := loadEnvFile(envFile); err != nil {
-		log.Printf("Warning: could not load .env file: %v", err)
+		slog.Warn("could not load .env file", "error", err)
 	}
 
 	secret := os.Getenv("GITHUB_WEBHOOK_SECRET")

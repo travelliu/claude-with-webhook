@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"claude-with-webhook/pkg/logger"
 	"claude-with-webhook/pkg/server"
 
 	"github.com/spf13/cobra"
@@ -23,20 +24,16 @@ const (
 var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the webhook server",
-	Long:  `Start the Claude webhook server to listen for GitHub issue/webhook events.
+	Long: `Start the Claude webhook server to listen for GitHub issue/webhook events.
 Runs in the background by default. Use --foreground to run in the current terminal.`,
-	RunE:  runStart,
+	RunE: runStart,
 }
 
 func init() {
 	startCmd.Flags().Bool(flagForeground, false, "Run in the foreground instead of background")
 	startCmd.Flags().StringP("port", "p", "", "Server port (overrides .env PORT)")
 	startCmd.Flags().IntP("max-concurrent", "j", 0, "Max concurrent jobs (overrides .env MAX_CONCURRENT)")
-	addStartCommand()
-}
-
-func addStartCommand() {
-	rootCmd.AddCommand(startCmd)
+	startCmd.Flags().String("log-level", "", "Log level: debug, info, warn, error (default: info)")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -58,6 +55,13 @@ func runStartForeground(cmd *cobra.Command) error {
 	if maxConcurrent, _ := cmd.Flags().GetInt("max-concurrent"); maxConcurrent > 0 {
 		os.Setenv("MAX_CONCURRENT", strconv.Itoa(maxConcurrent))
 	}
+
+	// Initialize structured logger
+	logLevel, _ := cmd.Flags().GetString("log-level")
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	logger.Init(logLevel)
 
 	// Start server in foreground
 	fmt.Println("Starting server in foreground mode...")
@@ -131,16 +135,6 @@ func runStartBackground(cmd *cobra.Command) error {
 		fmt.Fprintf(os.Stderr, "Warning: could not write PID file: %v\n", err)
 	}
 
-	// Check and update webhooks before waiting for server ready
-	configFile := GetConfigFile()
-	if cfg, err := LoadConfig(configFile); err == nil {
-		if err := CheckAndUpdateWebhooks(cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: webhook check failed: %v\n", err)
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "Warning: could not load config for webhook check: %v\n", err)
-	}
-
 	// Wait for server to be ready (up to 15 seconds)
 	deadline := time.Now().Add(15 * time.Second)
 	started := false
@@ -176,10 +170,12 @@ func buildStartArgs(cmd *cobra.Command) []string {
 	if maxConcurrent, _ := cmd.Flags().GetInt("max-concurrent"); maxConcurrent > 0 {
 		args = append(args, "--max-concurrent", strconv.Itoa(maxConcurrent))
 	}
+	if logLevel, _ := cmd.Flags().GetString("log-level"); logLevel != "" {
+		args = append(args, "--log-level", logLevel)
+	}
 
 	return args
 }
-
 
 // --- daemon helpers ---
 

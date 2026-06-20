@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"crypto/hmac"
@@ -65,7 +65,7 @@ func TestSanitizeError(t *testing.T) {
 			name:  "truncates long output",
 			input: strings.Repeat("a", 1000),
 			checks: func(t *testing.T, result string) {
-				if len(result) > maxErrorLen+50 { // allow for "... (truncated)" suffix
+				if len(result) > maxErrorLen+50 {
 					t.Errorf("should truncate, got length %d", len(result))
 				}
 				if !strings.Contains(result, "... (truncated)") {
@@ -97,7 +97,7 @@ func TestFilterSafeFiles(t *testing.T) {
 		name     string
 		input    string
 		expected []string
-		skipped  []string // files that should NOT appear
+		skipped  []string
 	}{
 		{
 			name:     "normal files pass through",
@@ -217,9 +217,11 @@ func TestIsDangerousFile(t *testing.T) {
 
 func TestClassifyComment(t *testing.T) {
 	baseCfg := &Config{
-		AllowedUsers: map[string]bool{"alice": true},
+		AllowedUsers:  map[string]bool{"alice": true},
 		BotUsername:   "my-bot",
+		CommandPrefix: "@claude",
 	}
+	srv := &Server{config: baseCfg}
 
 	tests := []struct {
 		name       string
@@ -229,7 +231,6 @@ func TestClassifyComment(t *testing.T) {
 		body       string
 		expected   string
 	}{
-		// BOT_USERNAME / sender filtering
 		{
 			name:       "Bot type filtered",
 			cfg:        baseCfg,
@@ -265,8 +266,9 @@ func TestClassifyComment(t *testing.T) {
 		{
 			name: "no BOT_USERNAME set, allowed user passes",
 			cfg: &Config{
-				AllowedUsers: map[string]bool{"alice": true},
+				AllowedUsers:  map[string]bool{"alice": true},
 				BotUsername:   "",
+				CommandPrefix: "@claude",
 			},
 			sender:     "alice",
 			senderType: "User",
@@ -281,8 +283,6 @@ func TestClassifyComment(t *testing.T) {
 			body:       "@claude approve",
 			expected:   "skip-user",
 		},
-
-		// Command routing
 		{
 			name:       "approve command",
 			cfg:        baseCfg,
@@ -351,7 +351,8 @@ func TestClassifyComment(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyComment(tt.cfg, "test/repo", tt.sender, tt.senderType, tt.body)
+			srv.config = tt.cfg
+			got := srv.classifyComment("test/repo", tt.sender, tt.senderType, tt.body)
 			if got != tt.expected {
 				t.Errorf("classifyComment() = %q, want %q", got, tt.expected)
 			}
@@ -361,8 +362,10 @@ func TestClassifyComment(t *testing.T) {
 
 func TestExactApproveMatching(t *testing.T) {
 	cfg := &Config{
-		AllowedUsers: map[string]bool{"alice": true},
+		AllowedUsers:  map[string]bool{"alice": true},
+		CommandPrefix: "@claude",
 	}
+	srv := &Server{config: cfg}
 
 	tests := []struct {
 		body     string
@@ -372,7 +375,6 @@ func TestExactApproveMatching(t *testing.T) {
 		{"@claude approved", "approve"},
 		{"@claude lgtm", "approve"},
 		{"@claude approve focus on tests", "approve"},
-		// These should NOT trigger approve — they are follow-ups
 		{"@claude I approve of this approach", "followup"},
 		{"@claude the plan looks approved already", "followup"},
 		{"@claude approving this seems premature", "followup"},
@@ -380,7 +382,7 @@ func TestExactApproveMatching(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.body, func(t *testing.T) {
-			got := classifyComment(cfg, "test/repo", "alice", "User", tt.body)
+			got := srv.classifyComment("test/repo", "alice", "User", tt.body)
 			if got != tt.expected {
 				t.Errorf("classifyComment(%q) = %q, want %q", tt.body, got, tt.expected)
 			}
@@ -393,12 +395,13 @@ func TestWebhookSignatureVerification(t *testing.T) {
 	cfg := &Config{
 		WebhookSecret: secret,
 		AllowedUsers:  map[string]bool{"alice": true},
-		repos:         map[string]string{"owner/repo": "/tmp/repo"},
+		repos:         map[string]RepoConfig{"owner/repo": {Dir: "/tmp/repo"}},
 		Port:          "0",
 	}
-
-	// Initialize semaphore for the handler.
-	semaphore = make(chan struct{}, 3)
+	srv := &Server{
+		config:    cfg,
+		semaphore: make(chan struct{}, 3),
+	}
 
 	validPayload := `{"action":"ping","repository":{"full_name":"owner/repo"}}`
 
@@ -449,7 +452,7 @@ func TestWebhookSignatureVerification(t *testing.T) {
 			}
 
 			rr := httptest.NewRecorder()
-			handleWebhook(rr, req, cfg, "owner/repo")
+			srv.handleWebhook(rr, req, "owner/repo")
 
 			if rr.Code != tt.wantStatus {
 				t.Errorf("status = %d, want %d", rr.Code, tt.wantStatus)
@@ -460,39 +463,30 @@ func TestWebhookSignatureVerification(t *testing.T) {
 
 func TestQueuedConcurrency(t *testing.T) {
 	t.Run("semaphore_blocks_then_proceeds", func(t *testing.T) {
-		// Create a semaphore with capacity 1.
-		semaphore = make(chan struct{}, 1)
-
-		// Fill the single slot.
-		semaphore <- struct{}{}
+		sem := make(chan struct{}, 1)
+		sem <- struct{}{}
 
 		acquired := make(chan struct{})
 		go func() {
-			semaphore <- struct{}{} // should block until slot freed
+			sem <- struct{}{}
 			close(acquired)
 		}()
 
-		// Verify it blocks: should NOT acquire within 50ms.
 		select {
 		case <-acquired:
 			t.Fatal("goroutine should have blocked on full semaphore")
 		case <-time.After(50 * time.Millisecond):
-			// expected: still blocked
 		}
 
-		// Free one slot.
-		<-semaphore
+		<-sem
 
-		// Verify it proceeds: should acquire within 100ms.
 		select {
 		case <-acquired:
-			// expected: unblocked
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("goroutine should have acquired semaphore after release")
 		}
 
-		// Drain the slot the goroutine filled.
-		<-semaphore
+		<-sem
 	})
 
 	t.Run("per_issue_mutex_serializes", func(t *testing.T) {
@@ -510,20 +504,16 @@ func TestQueuedConcurrency(t *testing.T) {
 			m.(*sync.Mutex).Unlock()
 		}()
 
-		// Verify it blocks.
 		select {
 		case <-acquired:
 			t.Fatal("goroutine should have blocked on locked mutex")
 		case <-time.After(50 * time.Millisecond):
-			// expected: still blocked
 		}
 
-		// Unlock and verify it proceeds.
 		mu.(*sync.Mutex).Unlock()
 
 		select {
 		case <-acquired:
-			// expected: unblocked
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("goroutine should have acquired mutex after unlock")
 		}
@@ -551,7 +541,6 @@ func TestSpinnerSVG(t *testing.T) {
 		if !strings.Contains(body, "🤖 Planning") {
 			t.Error("progressBody should contain action header")
 		}
-		// Should be just header, no trailing content.
 		expected := "🤖 Planning\n\n" + spinnerImg
 		if body != expected {
 			t.Errorf("progressBody empty partial:\ngot:  %q\nwant: %q", body, expected)
@@ -599,16 +588,13 @@ func TestProgressUpdateDedup(t *testing.T) {
 		}
 	}()
 
-	// Write "hello", wait for tick to fire.
 	accMu.Lock()
 	accumulated.WriteString("hello")
 	accMu.Unlock()
 	time.Sleep(30 * time.Millisecond)
 
-	// No change — tick should skip.
 	time.Sleep(30 * time.Millisecond)
 
-	// Write " world" — tick should fire again.
 	accMu.Lock()
 	accumulated.WriteString(" world")
 	accMu.Unlock()
@@ -664,7 +650,7 @@ func TestTruncateLog(t *testing.T) {
 		input    string
 		max      int
 		contains string
-		notLong  bool // result should be shorter than input
+		notLong  bool
 	}{
 		{
 			name:     "short stays intact",
@@ -703,60 +689,6 @@ func TestTruncateLog(t *testing.T) {
 				t.Errorf("expected truncation, but result (%d) >= input (%d)", len(result), len(tt.input))
 			}
 		})
-	}
-}
-
-func TestAssistantTurnSeparator(t *testing.T) {
-	// Multiple assistant events should be separated by \n\n
-	var accumulated strings.Builder
-	var accMu sync.Mutex
-
-	events := []streamEvent{
-		{
-			Type: "assistant",
-			Message: &streamMessage{
-				Content: []streamContent{
-					{Type: "text", Text: "First turn response."},
-				},
-			},
-		},
-		{
-			Type: "assistant",
-			Message: &streamMessage{
-				Content: []streamContent{
-					{Type: "text", Text: "Second turn response."},
-				},
-			},
-		},
-		{
-			Type: "assistant",
-			Message: &streamMessage{
-				Content: []streamContent{
-					{Type: "text", Text: "Third turn response."},
-				},
-			},
-		},
-	}
-
-	for _, evt := range events {
-		if evt.Type == "assistant" && evt.Message != nil {
-			for _, c := range evt.Message.Content {
-				if c.Type == "text" && c.Text != "" {
-					accMu.Lock()
-					if accumulated.Len() > 0 {
-						accumulated.WriteString("\n\n")
-					}
-					accumulated.WriteString(c.Text)
-					accMu.Unlock()
-				}
-			}
-		}
-	}
-
-	got := accumulated.String()
-	want := "First turn response.\n\nSecond turn response.\n\nThird turn response."
-	if got != want {
-		t.Errorf("accumulated text =\n%q\nwant:\n%q", got, want)
 	}
 }
 
@@ -800,8 +732,10 @@ func TestIsLGTM(t *testing.T) {
 
 func TestPolishFlagParsing(t *testing.T) {
 	cfg := &Config{
-		AllowedUsers: map[string]bool{"alice": true},
+		AllowedUsers:  map[string]bool{"alice": true},
+		CommandPrefix: "@claude",
 	}
+	srv := &Server{config: cfg}
 
 	tests := []struct {
 		body        string
@@ -817,7 +751,7 @@ func TestPolishFlagParsing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.description, func(t *testing.T) {
-			got := classifyComment(cfg, "test/repo", "alice", "User", tt.body)
+			got := srv.classifyComment("test/repo", "alice", "User", tt.body)
 			if got != tt.wantAction {
 				t.Errorf("classifyComment(%q) = %q, want %q", tt.body, got, tt.wantAction)
 			}
@@ -826,7 +760,6 @@ func TestPolishFlagParsing(t *testing.T) {
 }
 
 func TestPolishFlagExtraction(t *testing.T) {
-	// Simulate the flag extraction logic from handleIssueComment.
 	tests := []struct {
 		cmd         string
 		extra       string
@@ -846,16 +779,13 @@ func TestPolishFlagExtraction(t *testing.T) {
 			extra := tt.extra
 			polish := false
 
-			// Extract --polish from extra.
 			if strings.Contains(extra, "--polish") {
 				polish = true
 				extra = strings.TrimSpace(strings.ReplaceAll(extra, "--polish", ""))
 			}
-			// Check cmd for --polish.
 			if strings.Contains(tt.cmd, "--polish") {
 				polish = true
 			}
-			// Also strip --auto-merge for cleaner comparison.
 			extra = strings.TrimSpace(strings.ReplaceAll(extra, "--auto-merge", ""))
 
 			if polish != tt.wantPolish {

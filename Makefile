@@ -1,7 +1,8 @@
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  := -X main.version=$(VERSION) -X main.buildTime=$(BUILD)
-INSTALL  := $(HOME)/.claude-webhook
+BIN_DIR  := $(HOME)/.local/bin
+WORK_DIR := $(HOME)/.claude-webhook
 
 .PHONY: build install uninstall clean restart
 
@@ -9,49 +10,41 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o claude-webhook-server .
 
 install: build
-	@mkdir -p $(INSTALL)
-	@cp claude-webhook-server $(INSTALL)/
-	@echo "$(CURDIR)" > $(INSTALL)/source-repo
-	@# Install CLI wrapper scripts
-	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/cwh
-	@chmod +x $(INSTALL)/cwh
-	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/start
-	@chmod +x $(INSTALL)/start
-	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/stop
-	@chmod +x $(INSTALL)/stop
-	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/restart
-	@chmod +x $(INSTALL)/restart
-	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/status
-	@chmod +x $(INSTALL)/status
-	@printf '#!/usr/bin/env bash\nset -euo pipefail\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/claude-webhook-server" "$$@"\n' > $(INSTALL)/register
-	@chmod +x $(INSTALL)/register
+	@mkdir -p $(BIN_DIR)
+	@cp claude-webhook-server $(BIN_DIR)/claude-webhook-server
+	@chmod +x $(BIN_DIR)/claude-webhook-server
+	@mkdir -p $(WORK_DIR)
+	@echo "$(CURDIR)" > $(WORK_DIR)/source-repo
 	@# Generate .env if missing
-	@if [ ! -f $(INSTALL)/.env ]; then \
+	@if [ ! -f $(WORK_DIR)/.env ]; then \
 		SECRET=$$(openssl rand -hex 20); \
 		USER=$$(gh api user --jq '.login'); \
-		printf 'GITHUB_WEBHOOK_SECRET=%s\nALLOWED_USERS=%s\nBOT_USERNAME=%s\nPORT=8080\n' "$$SECRET" "$$USER" "$$USER" > $(INSTALL)/.env; \
+		printf 'GITHUB_WEBHOOK_SECRET=%s\nALLOWED_USERS=%s\nPORT=8080\n' "$$SECRET" "$$USER" > $(WORK_DIR)/.env; \
 		echo "Generated .env (user=$$USER)"; \
 	fi
 	@echo
-	@echo "Installed $(VERSION) → $(INSTALL)/claude-webhook-server"
+	@echo "Installed $(VERSION)"
 	@echo
-	@echo "  CLI:       $(INSTALL)/cwh [command]"
-	@echo "  Start:     $(INSTALL)/start"
-	@echo "  Stop:      $(INSTALL)/stop"
-	@echo "  Restart:   $(INSTALL)/restart"
-	@echo "  Status:    $(INSTALL)/status"
-	@echo "  Register:  cd /path/to/repo && $(INSTALL)/register"
+	@echo "  Binary:    $(BIN_DIR)/claude-webhook-server"
+	@echo "  Work dir:  $(WORK_DIR)/"
+	@echo
+	@echo "  Commands:"
+	@echo "    claude-webhook-server bot add"
+	@echo "    claude-webhook-server register"
+	@echo "    claude-webhook-server start"
+	@echo "    claude-webhook-server status"
 	@echo
 
 restart: install
-	@$(INSTALL)/stop 2>/dev/null || true
-	@$(INSTALL)/start &
+	@claude-webhook-server stop 2>/dev/null || true
+	@claude-webhook-server start
 	@echo "Server restarted."
 
 uninstall:
-	@$(INSTALL)/stop 2>/dev/null || true
-	@rm -rf $(INSTALL)
-	@echo "Removed $(INSTALL)"
+	@claude-webhook-server stop 2>/dev/null || true
+	@rm -f $(BIN_DIR)/claude-webhook-server
+	@echo "Removed $(BIN_DIR)/claude-webhook-server"
+	@echo "Work dir $(WORK_DIR)/ preserved (contains your config)"
 
 clean:
 	@rm -f claude-webhook-server

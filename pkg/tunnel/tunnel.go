@@ -3,9 +3,10 @@ package tunnel
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -21,15 +22,21 @@ const (
 
 // Manager handles tunnel operations
 type Manager struct {
-	baseDir string
-	port    string
+	baseDir    string
+	port       string
+	tunnelPort string // port ngrok/tailscale forwards to (defaults to port)
 }
 
 // NewManager creates a new tunnel manager
 func NewManager(baseDir, port string) *Manager {
+	tunnelPort := os.Getenv("TUNNEL_PORT")
+	if tunnelPort == "" {
+		tunnelPort = port
+	}
 	return &Manager{
-		baseDir: baseDir,
-		port:    port,
+		baseDir:    baseDir,
+		port:       port,
+		tunnelPort: tunnelPort,
 	}
 }
 
@@ -39,7 +46,7 @@ func (m *Manager) EnsureStarted() (string, error) {
 	tunnelType, err := m.detectType()
 	if err != nil {
 		// No tunnel configured, try to auto-detect
-		log.Println("No tunnel configured, auto-detecting...")
+		slog.Info("no tunnel configured, auto-detecting")
 		tunnelType, err = DetectType()
 		if err != nil {
 			return "", fmt.Errorf("auto-detect tunnel: %w", err)
@@ -47,10 +54,10 @@ func (m *Manager) EnsureStarted() (string, error) {
 
 		// Save detected type
 		if err := m.SaveType(tunnelType); err != nil {
-			log.Printf("Warning: could not save tunnel type: %v", err)
+			slog.Warn("could not save tunnel type", "error", err)
 		}
 
-		log.Printf("Auto-detected tunnel: %s", tunnelType)
+		slog.Info("auto-detected tunnel", "type", tunnelType)
 	}
 
 	switch tunnelType {
@@ -114,16 +121,16 @@ func (m *Manager) ensureTailscale() (string, error) {
 	}
 
 	status := string(out)
-	portPattern := "127.0.0.1:" + m.port
-	localhostPattern := "localhost:" + m.port
+	portPattern := "127.0.0.1:" + m.tunnelPort
+	localhostPattern := "localhost:" + m.tunnelPort
 
 	if strings.Contains(status, portPattern) || strings.Contains(status, localhostPattern) {
-		log.Println("Tailscale Funnel already running")
+		slog.Info("tailscale funnel already running")
 		return getTailscaleURL()
 	}
 
-	log.Printf("Starting Tailscale Funnel on port %s...", m.port)
-	if err := exec.Command("tailscale", "funnel", "--bg", m.port).Run(); err != nil {
+	slog.Info("starting tailscale funnel", "tunnel_port", m.tunnelPort, "server_port", m.port)
+	if err := exec.Command("tailscale", "funnel", "--bg", m.tunnelPort).Run(); err != nil {
 		return "", fmt.Errorf("start funnel: %w", err)
 	}
 
@@ -134,14 +141,14 @@ func (m *Manager) ensureTailscale() (string, error) {
 func (m *Manager) ensureNgrok() (string, error) {
 	// Check if ngrok API is available
 	if !m.isNgrokRunning() {
-		log.Printf("Starting ngrok tunnel on port %s...", m.port)
-		// Start ngrok in background
-		cmd := exec.Command("ngrok", "http", m.port, "--log=stdout")
+		slog.Info("starting ngrok tunnel", "tunnel_port", m.tunnelPort, "server_port", m.port)
+		// Start ngrok detached (no stdout/stderr to avoid blocking terminal)
+		cmd := exec.Command("ngrok", "http", m.tunnelPort, "--log=stdout")
 		if err := cmd.Start(); err != nil {
 			return "", fmt.Errorf("start ngrok: %w", err)
 		}
 
-		// Wait for ngrok to be ready
+		// Wait for ngrok to be ready (30 seconds)
 		if err := m.waitForNgrok(); err != nil {
 			return "", fmt.Errorf("wait for ngrok: %w", err)
 		}
@@ -155,13 +162,13 @@ func (m *Manager) ensureZrok() (string, error) {
 	// Check if zrok is already sharing
 	url, err := getZrokURL()
 	if err == nil && url != "" {
-		log.Println("Zrok already sharing")
+		slog.Info("zrok already sharing")
 		return url, nil
 	}
 
-	log.Printf("Starting zrok public share on port %s...", m.port)
+	slog.Info("starting zrok public share", "tunnel_port", m.tunnelPort, "server_port", m.port)
 	cmd := exec.Command("zrok", "share", "public",
-		fmt.Sprintf("http://localhost:%s", m.port), "--headless")
+		fmt.Sprintf("http://localhost:%s", m.tunnelPort), "--headless")
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start zrok: %w", err)
 	}
@@ -171,23 +178,57 @@ func (m *Manager) ensureZrok() (string, error) {
 	return getZrokURL()
 }
 
+// ngrokDefaultAPI is the default ngrok API address
+const ngrokDefaultAPI = "http://127.0.0.1:4040/api/tunnels"
+
+// ngrokAPIURL returns the ngrok API URL by reading its config file
+func ngrokAPIURL() string {
+	home, _ := os.UserHomeDir()
+	configPaths := []string{
+		filepath.Join(home, ".config", "ngrok", "ngrok.yml"),
+		filepath.Join(home, ".ngrok2", "ngrok.yml"),
+	}
+
+	for _, path := range configPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		// Parse web_addr from YAML (simple extraction, no YAML dependency)
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "web_addr:") {
+				addr := strings.TrimSpace(strings.TrimPrefix(line, "web_addr:"))
+				addr = strings.Trim(addr, "\"'")
+				if addr != "" {
+					if !strings.HasPrefix(addr, "http") {
+						addr = "http://" + addr
+					}
+					return addr + "/api/tunnels"
+				}
+			}
+		}
+	}
+
+	return ngrokDefaultAPI
+}
+
 // isNgrokRunning checks if ngrok is running
 func (m *Manager) isNgrokRunning() bool {
-	cmd := exec.Command("curl", "-s", "--max-time", "1",
-		"http://127.0.0.1:4040/api/tunnels")
+	cmd := exec.Command("curl", "-s", "--max-time", "1", ngrokAPIURL())
 	out, err := cmd.Output()
 	return err == nil && len(out) > 0
 }
 
-// waitForNgrok waits for ngrok to be ready
+// waitForNgrok waits for ngrok to be ready (up to 30 seconds)
 func (m *Manager) waitForNgrok() error {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 60; i++ {
 		if m.isNgrokRunning() {
 			return nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("ngrok did not start within timeout")
+	return fmt.Errorf("ngrok did not start within 30s")
 }
 
 // getTailscaleURL returns Tailscale Funnel URL
@@ -217,11 +258,13 @@ func getTailscaleURL() (string, error) {
 
 // getNgrokURL returns ngrok tunnel URL
 func getNgrokURL() (string, error) {
-	out, err := exec.Command("curl", "-s", "--max-time", "2",
-		"http://127.0.0.1:4040/api/tunnels").Output()
+	apiURL := ngrokAPIURL()
+	out, err := exec.Command("curl", "-s", "--max-time", "2", apiURL).Output()
 	if err != nil {
-		return "", fmt.Errorf("ngrok API not available: %w", err)
+		return "", fmt.Errorf("ngrok API not available at %s: %w", apiURL, err)
 	}
+
+	slog.Debug("ngrok API response", "response", string(out))
 
 	var response struct {
 		Tunnels []struct {
@@ -234,13 +277,23 @@ func getNgrokURL() (string, error) {
 		return "", fmt.Errorf("parse ngrok response: %w", err)
 	}
 
+	// Prefer HTTPS, fall back to HTTP
+	var httpURL string
 	for _, tunnel := range response.Tunnels {
 		if tunnel.Proto == "https" && tunnel.PublicURL != "" {
 			return tunnel.PublicURL, nil
 		}
+		if tunnel.Proto == "http" && tunnel.PublicURL != "" {
+			httpURL = tunnel.PublicURL
+		}
 	}
 
-	return "", fmt.Errorf("no ngrok HTTPS tunnel found")
+	if httpURL != "" {
+		slog.Warn("ngrok: no HTTPS tunnel, using HTTP", "url", httpURL)
+		return httpURL, nil
+	}
+
+	return "", fmt.Errorf("no ngrok tunnel found (checked %s)", apiURL)
 }
 
 // getZrokURL returns zrok share URL
