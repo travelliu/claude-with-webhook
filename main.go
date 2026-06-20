@@ -27,24 +27,19 @@ import (
 )
 
 func main() {
-	// Check if subcommands are requested
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "register", "status", "webhook", "tunnel", "help", "--help", "-h":
-			// Delegate to Cobra for subcommands
-			os.Args[0] = "claude-webhook-server"
-			if err := cmd.Execute(); err != nil {
-				os.Exit(1)
-			}
-			return
-		case "start":
-			// Remove 'start' and continue with normal server startup
-			os.Args = append(os.Args[:1], os.Args[2:]...)
-		}
+	// Always delegate to Cobra for consistent command handling
+	os.Args[0] = "claude-webhook-server"
+
+	// Check if user wants to start the server directly (no subcommand provided)
+	// If no subcommand, default to "start" for backward compatibility
+	if len(os.Args) == 1 {
+		// No arguments: default to start command
+		os.Args = append(os.Args, "start")
 	}
 
-	// Default behavior: start the server
-	runServer()
+	if err := cmd.Execute(); err != nil {
+		os.Exit(1)
+	}
 }
 
 // runServer starts the webhook server (existing logic)
