@@ -175,6 +175,26 @@ func (s *Server) handleIssueOpened(repo, repoDir string, num int, p webhookPaylo
 		return
 	}
 
+	// Check if auto-plan is disabled for this repo.
+	// When disabled, only trigger if the issue body contains an @bot command anywhere.
+	if rc, ok := s.config.GetRepoConfig(repo); ok && rc.AutoPlan != nil && !*rc.AutoPlan {
+		action, bot := s.extractBotCommand(p.Issue.Body)
+		if bot == nil {
+			s.log.Info("auto-plan disabled and no @bot command in issue body, skipping", "repo", repo, "issue", num)
+			return
+		}
+		switch action {
+		case "plan":
+			s.reactToIssue(repo, repoDir, num, s.botToken(bot))
+			s.runPlan(repo, repoDir, num, p.Issue.Title, p.Issue.Body, bot)
+		case "approve":
+			s.log.Info("cannot approve on issue open, skipping", "repo", repo, "issue", num)
+		default:
+			s.log.Info("unsupported command on issue open, skipping", "repo", repo, "issue", num, "action", action)
+		}
+		return
+	}
+
 	s.reactToIssue(repo, repoDir, num, "")
 	s.runPlan(repo, repoDir, num, p.Issue.Title, p.Issue.Body, nil)
 }
@@ -241,6 +261,31 @@ func (s *Server) runPlan(repo, repoDir string, num int, title, issueBody string,
 	commentBody := fmt.Sprintf(planCommentTemplate, planText, prefix, examples+formatMetadataFooter(result))
 	updateComment(commentBody)
 	s.setIssueLabel(repo, repoDir, num, "planned", token)
+}
+
+// extractBotCommand searches entire body text for an @bot command (e.g. "@claude plan").
+// Unlike matchBot which requires the prefix at the start of the first line, this scans
+// for the prefix anywhere in the body and extracts the command word following it.
+// Returns the parsed action and matched bot, or ("", nil) if no command found.
+func (s *Server) extractBotCommand(body string) (string, *BotConfig) {
+	lower := strings.ToLower(body)
+	for i := range s.bots {
+		bot := &s.bots[i]
+		prefix := strings.ToLower(bot.Prefix)
+		idx := strings.Index(lower, prefix)
+		if idx == -1 {
+			continue
+		}
+		rest := strings.TrimSpace(lower[idx+len(prefix):])
+		cmd, _, _ := strings.Cut(rest, " ")
+		cmd = strings.TrimSpace(cmd)
+		action := classifyCommand(cmd)
+		if action == "skip-bare-mention" || action == "skip-no-prefix" {
+			continue
+		}
+		return action, bot
+	}
+	return "", nil
 }
 
 // matchBot finds the bot whose prefix matches the comment body.

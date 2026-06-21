@@ -42,6 +42,7 @@ type RepoConfig struct {
 	DefaultBot   string   `yaml:"default_bot,omitempty"`    // bot name when no @mention
 	AllowedUsers []string `yaml:"allowed_users,omitempty"`
 	WebhookToken string   `yaml:"webhook_token,omitempty"` // token with admin:repo_hook scope
+	AutoPlan     *bool    `yaml:"auto_plan,omitempty"`      // auto-trigger plan on issue open (nil/false=disabled, true=enabled)
 }
 
 type Config struct {
