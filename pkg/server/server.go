@@ -209,7 +209,7 @@ func (s *Server) checkAndUpdateWebhooks() error {
 			s.log.Error("webhook check failed, please configure manually",
 				"repo", repo,
 				"expected_url", expectedURL,
-				"secret", s.config.WebhookSecret,
+				"secret_source", "GITHUB_WEBHOOK_SECRET in .env",
 				"error", err)
 		}
 	}

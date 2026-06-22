@@ -224,21 +224,19 @@ func (s *Server) runPlan(repo, repoDir string, num int, title, issueBody string,
 	token := s.botToken(bot)
 	s.setIssueLabel(repo, repoDir, num, "planning", token)
 
-	updateComment, _ := s.postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Planning…\n\n%s", spinnerImg), token)
-
 	prompt, err := s.promptManager.LoadTaskPrompt(repo, "plan", map[string]string{
 		"Title":     title,
 		"IssueBody": issueBody,
 	})
 	if err != nil {
-		updateComment(formatError("Failed to load prompt template", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to load prompt template", err), token)
 		return
 	}
 	taskID := fmt.Sprintf("%s#%d", repo, num)
 	s.log.Info("agent started", "task", taskID, "action", "planning")
 	result, err := s.runAgent(repoDir, planTimeout, prompt, taskID, false, bot)
 	if err != nil {
-		updateComment(formatError("Failed to generate plan", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to generate plan", err), token)
 		return
 	}
 
@@ -266,7 +264,7 @@ func (s *Server) runPlan(repo, repoDir string, num int, title, issueBody string,
 - %s approve use TypeScript strict mode
 `, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix)
 	commentBody := fmt.Sprintf(planCommentTemplate, planText, prefix, examples+formatMetadataFooter(result))
-	updateComment(commentBody)
+	s.postIssueComment(repo, repoDir, num, commentBody, token)
 	s.setIssueLabel(repo, repoDir, num, "planned", token)
 }
 
@@ -538,11 +536,10 @@ func (s *Server) handleFollowUp(repo, repoDir string, num int, p webhookPayload,
 	s.log.Info("follow-up on issue", "repo", repo, "issue", num)
 
 	token := s.botToken(bot)
-	updateComment, _ := s.postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Thinking…\n\n%s", spinnerImg), token)
 
 	discussion, err := s.fetchDiscussion(repoDir, repo, num, "issue", bot)
 	if err != nil {
-		updateComment(formatError("Failed to read issue discussion", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to read issue discussion", err), token)
 		return
 	}
 
@@ -550,18 +547,18 @@ func (s *Server) handleFollowUp(repo, repoDir string, num int, p webhookPayload,
 		"Discussion": discussion,
 	})
 	if err != nil {
-		updateComment(formatError("Failed to load prompt template", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to load prompt template", err), token)
 		return
 	}
 	taskID := fmt.Sprintf("%s#%d", repo, num)
 	s.log.Info("agent started", "task", taskID, "action", "follow-up")
 	result, err := s.runAgent(repoDir, followUpTimeout, prompt, taskID, true, bot)
 	if err != nil {
-		updateComment(formatError("Claude follow-up failed", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Claude follow-up failed", err), token)
 		return
 	}
 
-	updateComment(result.Output + formatMetadataFooter(result))
+	s.postIssueComment(repo, repoDir, num, result.Output+formatMetadataFooter(result), token)
 }
 
 // retryIfNoChanges checks git status and retries the agent once if no changes were made.
@@ -620,15 +617,14 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 
 	token := s.botToken(bot)
 	s.setIssueLabel(repo, repoDir, num, "implementing", token)
-	updateComment, deleteSpinner := s.postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Implementing…\n\n%s", spinnerImg), token)
 
 	if _, err := runCmd(repoDir, gitTimeout, "git", "fetch", "origin", "main"); err != nil {
-		updateComment(formatError("Failed to fetch origin/main", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to fetch origin/main", err), token)
 		return
 	}
 
 	if _, err := runCmd(repoDir, gitTimeout, "git", "worktree", "add", worktreeDir, "-b", branch, "origin/main"); err != nil {
-		updateComment(formatError("Failed to create worktree", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to create worktree", err), token)
 		return
 	}
 
@@ -641,7 +637,7 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 
 	discussion, err := s.fetchDiscussion(repoDir, repo, num, "issue", bot)
 	if err != nil {
-		updateComment(formatError("Failed to read issue discussion", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to read issue discussion", err), token)
 		return
 	}
 
@@ -650,29 +646,30 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 		"ExtraGuidance": extraGuidance,
 	})
 	if err != nil {
-		updateComment(formatError("Failed to load prompt template", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to load prompt template", err), token)
 		return
 	}
 	taskID := fmt.Sprintf("%s#%d", repo, num)
 	s.log.Info("agent started", "task", taskID, "action", "implementing")
 	result, err := s.runAgent(worktreeDir, implementTimeout, prompt, taskID, false, bot)
 	if err != nil {
-		updateComment(formatError("Claude implementation failed", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Claude implementation failed", err), token)
 		return
 	}
 
-	status, err := s.retryIfNoChanges(repo, num, worktreeDir, prompt, result, func(str string) { updateComment(str) }, bot)
+	noopUpdate := func(string) {}
+	status, err := s.retryIfNoChanges(repo, num, worktreeDir, prompt, result, noopUpdate, bot)
 	if err != nil {
-		updateComment(formatError("Implementation failed", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Implementation failed", err), token)
 		return
 	}
 	if strings.TrimSpace(status) == "" {
-		updateComment("No changes were made by Claude after 2 attempts. Nothing to commit.")
+		s.postIssueComment(repo, repoDir, num, "No changes were made by Claude after 2 attempts. Nothing to commit.", token)
 		return
 	}
 
 	if polish {
-		s.runPolish(repo, num, worktreeDir, func(str string) { updateComment(str) }, bot)
+		s.runPolish(repo, num, worktreeDir, noopUpdate, bot)
 	}
 
 	title := p.Issue.Title
@@ -680,20 +677,20 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 
 	filesToAdd := filterSafeFiles(status)
 	if len(filesToAdd) == 0 {
-		updateComment("All changed files were filtered out by security policy. Nothing to commit.")
+		s.postIssueComment(repo, repoDir, num, "All changed files were filtered out by security policy. Nothing to commit.", token)
 		return
 	}
 	addArgs := append([]string{"add", "--"}, filesToAdd...)
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", addArgs...); err != nil {
-		updateComment(formatError("Failed to stage changes", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to stage changes", err), token)
 		return
 	}
 	if _, err := runCmdWithGitConfig(worktreeDir, gitTimeout, s.botGitName(bot), s.botGitEmail(bot), "git", "commit", "-m", commitMsg); err != nil {
-		updateComment(formatError("Failed to commit", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to commit", err), token)
 		return
 	}
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", "push", "-u", "origin", branch); err != nil {
-		updateComment(formatError("Failed to push branch", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to push branch", err), token)
 		return
 	}
 
@@ -701,12 +698,11 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 	prBody := s.generatePRDescription(repo, num, title, worktreeDir, bot)
 	prURL, err := runCmdWithToken(worktreeDir, gitTimeout, token, "gh", "pr", "create", "--title", prTitle, "--body", prBody, "--repo", repo)
 	if err != nil {
-		updateComment(formatError("Failed to create PR", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to create PR", err), token)
 		return
 	}
 
 	prURL = strings.TrimSpace(prURL)
-	deleteSpinner()
 	s.setIssueLabel(repo, repoDir, num, "review", token)
 
 	if autoMerge {
@@ -886,11 +882,10 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 	s.log.Info("handling PR comment", "repo", repo, "issue", num)
 
 	token := s.botToken(bot)
-	updateComment, deleteSpinner := s.postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Implementing…\n\n%s", spinnerImg), token)
 	branch, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "pr", "view", strconv.Itoa(num),
 		"--repo", repo, "--json", "headRefName", "--jq", ".headRefName")
 	if err != nil {
-		updateComment(formatError("Failed to get PR branch name", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to get PR branch name", err), token)
 		return
 	}
 	branch = strings.TrimSpace(branch)
@@ -898,15 +893,15 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 	worktreeDir := filepath.Join(repoDir, "worktrees", fmt.Sprintf("pr-%d", num))
 
 	if _, err := runCmd(repoDir, gitTimeout, "git", "fetch", "origin", branch); err != nil {
-		updateComment(formatError("Failed to fetch PR branch", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to fetch PR branch", err), token)
 		return
 	}
 	if _, err := runCmd(repoDir, gitTimeout, "git", "worktree", "add", worktreeDir, "origin/"+branch); err != nil {
-		updateComment(formatError("Failed to create worktree for PR branch", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to create worktree for PR branch", err), token)
 		return
 	}
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", "checkout", "-B", branch, "origin/"+branch); err != nil {
-		updateComment(formatError("Failed to checkout PR branch", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to checkout PR branch", err), token)
 		cleanupWorktree(repoDir, worktreeDir, "")
 		return
 	}
@@ -918,7 +913,7 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 
 	discussion, err := s.fetchDiscussion(repoDir, repo, num, "pr", bot)
 	if err != nil {
-		updateComment(formatError("Failed to read PR discussion", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to read PR discussion", err), token)
 		return
 	}
 
@@ -927,7 +922,7 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 		"ExtraGuidance": extraGuidance,
 	})
 	if err != nil {
-		updateComment(formatError("Failed to load prompt template", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to load prompt template", err), token)
 		return
 	}
 
@@ -935,17 +930,18 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 	s.log.Info("agent started", "task", taskID, "action", "pr-implementation")
 	result, err := s.runAgent(worktreeDir, implementTimeout, prompt, taskID, false, bot)
 	if err != nil {
-		updateComment(formatError("Claude implementation failed", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Claude implementation failed", err), token)
 		return
 	}
 
-	status, err := s.retryIfNoChanges(repo, num, worktreeDir, prompt, result, func(str string) { updateComment(str) }, bot)
+	noopUpdate := func(string) {}
+	status, err := s.retryIfNoChanges(repo, num, worktreeDir, prompt, result, noopUpdate, bot)
 	if err != nil {
-		updateComment(formatError("Implementation failed", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Implementation failed", err), token)
 		return
 	}
 	if strings.TrimSpace(status) == "" {
-		updateComment("No changes were made by Claude after 2 attempts. Nothing to commit.")
+		s.postIssueComment(repo, repoDir, num, "No changes were made by Claude after 2 attempts. Nothing to commit.", token)
 		return
 	}
 
@@ -953,24 +949,23 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 
 	filesToAdd := filterSafeFiles(status)
 	if len(filesToAdd) == 0 {
-		updateComment("All changed files were filtered out by security policy. Nothing to commit.")
+		s.postIssueComment(repo, repoDir, num, "All changed files were filtered out by security policy. Nothing to commit.", token)
 		return
 	}
 	addArgs := append([]string{"add", "--"}, filesToAdd...)
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", addArgs...); err != nil {
-		updateComment(formatError("Failed to stage changes", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to stage changes", err), token)
 		return
 	}
 	if _, err := runCmdWithGitConfig(worktreeDir, gitTimeout, s.botGitName(bot), s.botGitEmail(bot), "git", "commit", "-m", commitMsg); err != nil {
-		updateComment(formatError("Failed to commit", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to commit", err), token)
 		return
 	}
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", "push", "origin", branch); err != nil {
-		updateComment(formatError("Failed to push changes", err))
+		s.postIssueComment(repo, repoDir, num, formatError("Failed to push changes", err), token)
 		return
 	}
 
-	deleteSpinner()
 	s.postIssueComment(repo, repoDir, num, fmt.Sprintf("Changes pushed to `%s`.", branch), token)
 	s.log.Info("pushed PR changes", "repo", repo, "issue", num, "branch", branch)
 }

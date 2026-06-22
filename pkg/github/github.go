@@ -27,10 +27,13 @@ func NewClient() *Client {
 
 // GetWebhooks gets all webhooks for a repository
 func (c *Client) GetWebhooks(repo string) ([]Webhook, error) {
-	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/hooks", repo),
-		"--jq", ".[] | select(.config.url | endswith(\"/webhook\")) | {id: .id, url: .config.url, active: .active}").CombinedOutput()
+	cmd := exec.Command("gh", "api", fmt.Sprintf("repos/%s/hooks", repo),
+		"--jq", ".[] | select(.config.url | endswith(\"/webhook\")) | {id: .id, url: .config.url, active: .active}")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("get webhooks: %s", strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("get webhooks: %s", strings.TrimSpace(stderr.String()))
 	}
 
 	if len(out) == 0 {
