@@ -161,7 +161,7 @@ func runStartBackground(cmd *cobra.Command) error {
 
 // buildStartArgs constructs args for the background child process
 func buildStartArgs(cmd *cobra.Command) []string {
-	args := []string{"start", "--foreground"}
+	args := []string{"daemon", "start", "--foreground"}
 
 	// Forward port and max-concurrent flags
 	if port, _ := cmd.Flags().GetString("port"); port != "" {
