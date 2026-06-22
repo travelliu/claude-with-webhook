@@ -103,7 +103,8 @@ The `repo add` command:
 3. Sets up the tunnel (Tailscale/ngrok/zrok)
 4. Creates or updates the GitHub webhook
 5. Registers the repo in `repos.yaml`
-6. Signals the running server to reload config
+6. Creates default prompt templates in `~/.claude-webhook/prompts/{owner}/{repo}/`
+7. Signals the running server to reload config
 
 Flags: `--dir <path>` (repo directory, defaults to cwd), `--force`, `--skip-webhook`, `--skip-tunnel`, `--bot <name>`, `--webhook-user <gh-username>`, `--allow <user1,user2>`.
 
@@ -188,18 +189,55 @@ These work on both **issues** and **pull requests**:
 
 ## Prompt Customization
 
-Customize system prompts per repo and action:
+Prompts use Go `text/template` syntax. Each task has a `.tmpl` template with variables like `{{.Title}}`, `{{.Discussion}}`, etc.
+
+### Template Files
 
 ```
 ~/.claude-webhook/prompts/
-  default.md              # global default prompt
-  owner/repo1/
-    default.md            # repo-level override
-    plan.md               # repo + action override
-    implement.md
+├── system.md           # System prompt (base behavioral rules)
+├── plan.tmpl           # @claude plan
+├── approve.tmpl        # @claude approve
+├── followup.tmpl       # @claude <question>
+├── review.tmpl         # Code review (--polish)
+├── refine.tmpl         # Apply review feedback
+├── pr-desc.tmpl        # Generate PR description
+├── pr-implement.tmpl   # Implement PR changes
+├── retry.tmpl          # Retry when no changes detected
+└── owner/repo/         # Per-repo overrides (auto-created on repo add)
+    ├── system.md
+    ├── plan.tmpl
+    └── ...
 ```
 
-Lookup order: `{repo}/{action}.md` → `{repo}/default.md` → `default.md` → built-in default.
+### Lookup Order
+
+Repo-specific → global → built-in. For example, `approve.tmpl` for `owner/repo`:
+
+1. `~/.claude-webhook/prompts/owner/repo/approve.tmpl`
+2. `~/.claude-webhook/prompts/approve.tmpl`
+3. Built-in default
+
+### Template Variables
+
+| Variable | Used In | Description |
+|----------|---------|-------------|
+| `.Title` | plan | Issue title |
+| `.IssueBody` | plan | Issue body |
+| `.Discussion` | approve, followup, pr-implement | Full issue/PR discussion |
+| `.ExtraGuidance` | approve, pr-implement | Additional guidance from approver |
+| `.Diff` | review, pr-desc | Git diff |
+| `.Num` | pr-desc | Issue/PR number |
+| `.IssueTitle` | pr-desc | Issue title |
+| `.Stat` | pr-desc | Diff stat |
+| `.ReviewText` | refine | Code review feedback |
+| `.FirstResult` | retry | Previous agent output |
+| `.OriginalPrompt` | retry | Original task prompt |
+
+### System Prompt vs Task Prompt
+
+- **`system.md`** — Base rules for all tasks (behavioral, git, quality). Sent via `--append-system-prompt`.
+- **Task templates** (`.tmpl`) — Task-specific instructions. Sent as user message.
 
 ## Architecture
 
@@ -210,9 +248,17 @@ Lookup order: `{repo}/{action}.md` → `{repo}/default.md` → `default.md` → 
 ~/.claude-webhook/              # Working directory
 ├── bots.yaml                   # Bot configurations
 ├── repos.yaml                  # Repo registry (per-repo config)
-├── prompts/                    # Custom prompts
-│   ├── default.md
-│   └── owner/repo/
+├── prompts/                    # Prompt templates (text/template)
+│   ├── system.md               # System prompt (base rules)
+│   ├── plan.tmpl               # Task templates
+│   ├── approve.tmpl
+│   ├── followup.tmpl
+│   ├── review.tmpl
+│   ├── refine.tmpl
+│   ├── pr-desc.tmpl
+│   ├── pr-implement.tmpl
+│   ├── retry.tmpl
+│   └── owner/repo/             # Per-repo overrides (auto-created)
 ├── .env                        # Config (secret, port)
 └── server.log                  # Server logs (when running as daemon)
 ```

@@ -106,7 +106,8 @@ claude-webhook-server repo add /path/to/your-repo
 3. 设置隧道（Tailscale/ngrok/zrok）
 4. 创建或更新 GitHub webhook
 5. 在 `repos.yaml` 中注册仓库
-6. 发送信号通知运行中的服务器重载配置
+6. 在 `~/.claude-webhook/prompts/{owner}/{repo}/` 创建默认提示词模板
+7. 发送信号通知运行中的服务器重载配置
 
 可用参数：`--dir <path>`、`--force`、`--skip-webhook`、`--skip-tunnel`、`--bot <name>`、`--webhook-user <gh用户名>`、`--allow <用户1,用户2>`。
 
@@ -191,18 +192,55 @@ bots:
 
 ## 提示词自定义
 
-可按仓库和操作自定义系统提示词：
+提示词使用 Go `text/template` 语法，每个任务有独立的 `.tmpl` 模板，支持变量如 `{{.Title}}`、`{{.Discussion}}` 等。
+
+### 模板文件
 
 ```
 ~/.claude-webhook/prompts/
-  default.md              # 全局默认提示词
-  owner/repo1/
-    default.md            # 仓库级覆盖
-    plan.md               # 仓库 + 操作级覆盖
-    implement.md
+├── system.md           # 系统提示词（基础行为规则）
+├── plan.tmpl           # @claude plan
+├── approve.tmpl        # @claude approve
+├── followup.tmpl       # @claude <问题>
+├── review.tmpl         # 代码审查（--polish）
+├── refine.tmpl         # 应用审查反馈
+├── pr-desc.tmpl        # 生成 PR 描述
+├── pr-implement.tmpl   # 实现 PR 修改
+├── retry.tmpl          # 无变更时重试
+└── owner/repo/         # 仓库级覆盖（repo add 时自动创建）
+    ├── system.md
+    ├── plan.tmpl
+    └── ...
 ```
 
-查找顺序：`{repo}/{action}.md` → `{repo}/default.md` → `default.md` → 内置默认值。
+### 查找顺序
+
+仓库级 → 全局 → 内置默认值。例如 `owner/repo` 的 `approve.tmpl`：
+
+1. `~/.claude-webhook/prompts/owner/repo/approve.tmpl`
+2. `~/.claude-webhook/prompts/approve.tmpl`
+3. 内置默认值
+
+### 模板变量
+
+| 变量 | 使用场景 | 说明 |
+|------|---------|------|
+| `.Title` | plan | Issue 标题 |
+| `.IssueBody` | plan | Issue 内容 |
+| `.Discussion` | approve, followup, pr-implement | 完整讨论内容 |
+| `.ExtraGuidance` | approve, pr-implement | 额外指导 |
+| `.Diff` | review, pr-desc | Git diff |
+| `.Num` | pr-desc | Issue/PR 编号 |
+| `.IssueTitle` | pr-desc | Issue 标题 |
+| `.Stat` | pr-desc | Diff 统计 |
+| `.ReviewText` | refine | 代码审查反馈 |
+| `.FirstResult` | retry | 上次 agent 输出 |
+| `.OriginalPrompt` | retry | 原始任务提示词 |
+
+### 系统提示词 vs 任务提示词
+
+- **`system.md`** — 所有任务通用的基础规则（行为、git、质量）。通过 `--append-system-prompt` 发送。
+- **任务模板**（`.tmpl`）— 任务特定指令。作为用户消息发送。
 
 ## 架构
 
@@ -213,9 +251,17 @@ bots:
 ~/.claude-webhook/              # 工作目录
 ├── bots.yaml                   # Bot 配置
 ├── repos.yaml                  # 仓库注册表（仓库级配置）
-├── prompts/                    # 自定义提示词
-│   ├── default.md
-│   └── owner/repo/
+├── prompts/                    # 提示词模板（text/template）
+│   ├── system.md               # 系统提示词（基础规则）
+│   ├── plan.tmpl               # 任务模板
+│   ├── approve.tmpl
+│   ├── followup.tmpl
+│   ├── review.tmpl
+│   ├── refine.tmpl
+│   ├── pr-desc.tmpl
+│   ├── pr-implement.tmpl
+│   ├── retry.tmpl
+│   └── owner/repo/             # 仓库级覆盖（自动创建）
 ├── .env                        # 配置（密钥、端口）
 └── server.log                  # 服务器日志（守护进程模式时）
 ```
