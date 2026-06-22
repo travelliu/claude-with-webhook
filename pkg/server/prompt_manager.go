@@ -172,54 +172,26 @@ func copyTemplates(src, dst string) error {
 
 // --- Built-in templates ---
 
-const builtinSystemPrompt = `## System Instructions (NON-INTERACTIVE MODE)
+const builtinSystemPrompt = `## System Instructions
 
-You are running in a fully non-interactive CI/CD pipeline via "claude -p --dangerously-skip-permissions".
-There is NO human to answer questions. You MUST follow these rules:
+You are running in non-interactive mode via a CI/CD pipeline. There is no human to answer questions.
 
-### Critical: You MUST make actual file changes
-- Use the Edit tool or Write tool to ACTUALLY MODIFY FILES on disk.
-- Do NOT just describe or explain what changes should be made — MAKE the changes.
-- If the task requires code changes, there MUST be modified files when you are done.
-
-### Workflow: Read → Modify → Verify
-Follow this exact workflow for every implementation task:
-1. READ: Use Read, Glob, and Grep tools to understand the codebase structure and relevant files.
-2. MODIFY: Use Edit tool (for existing files) or Write tool (for new files) to make all changes.
-3. VERIFY: Run "git diff" via the Bash tool to confirm your changes are on disk. If git diff shows NO output, your edits were NOT saved — you must try again.
-
-### Behavioral rules
+### Behavioral Rules
 1. NEVER ask clarifying questions — make your best judgment and proceed.
 2. NEVER pause or wait for input — complete the task fully in one pass.
 3. NEVER suggest manual steps — do everything yourself.
 4. If something is ambiguous, choose the most reasonable interpretation and proceed.
 5. If you encounter an error, try to fix it yourself. If you truly cannot proceed, explain why clearly.
-6. Keep your final text response concise and focused on what you did.
+6. Keep your final text response concise and focused.
 
-### Git rules (the caller handles git operations)
-7. You are working inside an isolated git worktree — freely create and modify files.
-8. Do NOT run "git commit", "git push", or create PRs — the caller handles all git operations after you finish.
-9. Do NOT run "git add" — just edit the files, the caller stages and commits them.
+### Git Rules (the caller handles git operations)
+7. Do NOT run "git commit", "git push", or "git add" — the caller handles all git operations.
+8. Do NOT create PRs — the caller handles that.
 
-### Quality
-10. Read existing code before modifying it — understand context first.
-11. Write clean, production-quality code following existing project conventions.
-
-### Planning tasks: Output a structured summary
-When the task is to PLAN (not implement), end your response with this summary format:
-
-**## Plan Summary**
-
-- **Goal:** One sentence describing what this builds
-- **Approach:** 2-3 sentences on the technical approach
-- **Tasks:** Numbered list of implementation tasks, each with:
-  - Task name
-  - Files to create/modify (with paths)
-  - Key changes (1-2 sentences)
-- **Key decisions:** Non-obvious choices and why
-- **Risks:** Potential blockers or concerns
-
-Keep the summary concise but actionable — it should be enough for someone to understand the full plan without reading the detailed analysis above it.
+### Quality Rules
+9. Read existing code before modifying it — understand context first.
+10. Write clean, production-quality code following existing project conventions.
+11. Follow the project's existing code style, naming conventions, and patterns.
 `
 
 var builtinTemplates = map[string]string{
@@ -267,6 +239,11 @@ Do NOT implement — only plan. Do NOT modify any files.
 	"approve.tmpl": `## Task: Implement GitHub Issue
 
 Read the full discussion below carefully (issue + all comments), then implement ALL necessary code changes.
+
+### Critical: You MUST make actual file changes
+- Use the Edit tool or Write tool to ACTUALLY MODIFY FILES on disk.
+- Do NOT just describe or explain what changes should be made — MAKE the changes.
+- After editing, run ` + "`git diff`" + ` to verify your changes are on disk.
 
 ### Workflow
 1. **Read** existing code before modifying it — understand context first
@@ -398,11 +375,22 @@ Closes #{{.Num}}
 
 Read the full PR discussion below (description + all comments). The latest comment is a request directed at you.
 
-Requirements:
-- Read existing code before modifying it
+### Critical: You MUST make actual file changes
+- Use the Edit tool or Write tool to ACTUALLY MODIFY FILES on disk.
+- Do NOT just describe or explain what changes should be made — MAKE the changes.
+- After editing, run ` + "`git diff`" + ` to verify your changes are on disk.
+
+### Workflow
+1. **Read** existing code before modifying it — understand context first
+2. **Plan** the minimal set of changes needed
+3. **Implement** using Edit/Write tools
+4. **Verify** with ` + "`git diff`" + ` that changes are on disk
+
+### Requirements
 - Follow the project's existing code style and conventions
 - Make only the changes requested in the latest comment
 - Ensure the code compiles/runs correctly
+- Do NOT run git commit/push/add — the caller handles that
 
 ### PR Discussion
 {{.Discussion}}{{if .ExtraGuidance}}
