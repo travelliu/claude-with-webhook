@@ -2,10 +2,8 @@ package server
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -58,55 +56,4 @@ func SaveBots(baseDir string, bots *BotsFile) error {
 		return fmt.Errorf("write bots.yaml: %w", err)
 	}
 	return nil
-}
-
-// loadSystemPrompt loads a system prompt from the prompts directory.
-// Lookup order: {baseDir}/prompts/{repo}/{action}.md
-//   → {baseDir}/prompts/{repo}/default.md
-//   → {baseDir}/prompts/default.md
-//   → built-in fallback.
-func loadSystemPrompt(baseDir, repo, action string) string {
-	promptsDir := filepath.Join(baseDir, "prompts")
-
-	// Try repo/action.md
-	if repo != "" && action != "" {
-		if content := readPromptFile(promptsDir, repo, action+".md"); content != "" {
-			return content
-		}
-	}
-
-	// Try repo/default.md
-	if repo != "" {
-		if content := readPromptFile(promptsDir, repo, "default.md"); content != "" {
-			return content
-		}
-	}
-
-	// Try global default.md
-	if content := readPromptFile(promptsDir, "", "default.md"); content != "" {
-		return content
-	}
-
-	// Built-in fallback
-	return SystemPrompt
-}
-
-// readPromptFile reads a prompt file from the prompts directory.
-func readPromptFile(promptsDir, subdir, filename string) string {
-	var path string
-	if subdir != "" {
-		path = filepath.Join(promptsDir, subdir, filename)
-	} else {
-		path = filepath.Join(promptsDir, filename)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	content := strings.TrimSpace(string(data))
-	if content == "" {
-		return ""
-	}
-	slog.Info("loaded prompt", "path", path)
-	return content
 }

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	pkglog "claude-with-webhook/pkg/logger"
 )
 
 func TestSanitizeError(t *testing.T) {
@@ -221,7 +223,13 @@ func TestClassifyComment(t *testing.T) {
 		BotUsername:   "my-bot",
 		CommandPrefix: "@claude",
 	}
-	srv := &Server{config: baseCfg}
+	srv := &Server{
+		config: baseCfg,
+		log:    pkglog.New("test"),
+		bots: []BotConfig{
+			{Name: "claude", Username: "my-bot", Prefix: "@claude"},
+		},
+	}
 
 	tests := []struct {
 		name       string
@@ -365,7 +373,13 @@ func TestExactApproveMatching(t *testing.T) {
 		AllowedUsers:  map[string]bool{"alice": true},
 		CommandPrefix: "@claude",
 	}
-	srv := &Server{config: cfg}
+	srv := &Server{
+		config: cfg,
+		log:    pkglog.New("test"),
+		bots: []BotConfig{
+			{Name: "claude", Username: "my-bot", Prefix: "@claude"},
+		},
+	}
 
 	tests := []struct {
 		body     string
@@ -400,6 +414,7 @@ func TestWebhookSignatureVerification(t *testing.T) {
 	}
 	srv := &Server{
 		config:    cfg,
+		log:       pkglog.New("test"),
 		semaphore: make(chan struct{}, 3),
 	}
 
@@ -665,17 +680,17 @@ func TestTruncateLog(t *testing.T) {
 			contains: "line1",
 		},
 		{
-			name:     "truncates to tail",
+			name:     "truncates to head",
 			input:    "line1\nline2\nline3\nline4\nline5\nline6\nline7",
 			max:      2,
-			contains: "line6",
+			contains: "line1",
 			notLong:  true,
 		},
 		{
 			name:     "truncated shows line count",
 			input:    "a\nb\nc\nd\ne\nf",
 			max:      2,
-			contains: "(6 lines)",
+			contains: "(6 lines total)",
 		},
 	}
 
@@ -735,7 +750,13 @@ func TestPolishFlagParsing(t *testing.T) {
 		AllowedUsers:  map[string]bool{"alice": true},
 		CommandPrefix: "@claude",
 	}
-	srv := &Server{config: cfg}
+	srv := &Server{
+		config: cfg,
+		log:    pkglog.New("test"),
+		bots: []BotConfig{
+			{Name: "claude", Username: "my-bot", Prefix: "@claude"},
+		},
+	}
 
 	tests := []struct {
 		body        string

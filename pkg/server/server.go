@@ -24,6 +24,7 @@ import (
 // Server represents the webhook server
 type Server struct {
 	config          *Config
+	promptManager   *PromptManager
 	httpServer      *http.Server
 	githubClient    *github.Client
 	tunnelManager   *tunnel.Manager
@@ -65,6 +66,7 @@ type Config struct {
 func New(cfg *Config) *Server {
 	s := &Server{
 		config:        cfg,
+		promptManager: NewPromptManager(cfg.BaseDir),
 		log:           pkglog.New("server"),
 		githubClient:  github.NewClient(),
 		tunnelManager: tunnel.NewManager(cfg.BaseDir, cfg.Port),

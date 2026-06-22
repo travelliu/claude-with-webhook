@@ -226,7 +226,14 @@ func (s *Server) runPlan(repo, repoDir string, num int, title, issueBody string,
 
 	updateComment, _ := s.postProgressComment(repo, repoDir, num, fmt.Sprintf("🤖 Planning…\n\n%s", spinnerImg), token)
 
-	prompt := fmt.Sprintf("## Task: Plan Implementation\n\nAnalyze the GitHub issue below and produce a clear, actionable implementation plan. Include:\n- Files to create or modify\n- Key changes in each file\n- Edge cases to handle\n- Testing approach\n\nDo NOT implement — only plan.\n\n### Issue Title\n%s\n\n### Issue Body\n%s", title, issueBody)
+	prompt, err := s.promptManager.LoadTaskPrompt(repo, "plan", map[string]string{
+		"Title":     title,
+		"IssueBody": issueBody,
+	})
+	if err != nil {
+		updateComment(formatError("Failed to load prompt template", err))
+		return
+	}
 	taskID := fmt.Sprintf("%s#%d", repo, num)
 	s.log.Info("agent started", "task", taskID, "action", "planning")
 	result, err := s.runAgent(repoDir, planTimeout, prompt, taskID, false, bot)
@@ -539,7 +546,13 @@ func (s *Server) handleFollowUp(repo, repoDir string, num int, p webhookPayload,
 		return
 	}
 
-	prompt := fmt.Sprintf("## Task: Respond to Follow-Up\n\nRead the full GitHub issue discussion below (original issue + all comments). The latest comment is a follow-up question or request directed at you.\n\nRespond concisely and helpfully. If the question asks about code, reference specific files and line numbers. If it asks for changes, explain what you would do.\n\n### Discussion\n%s", discussion)
+	prompt, err := s.promptManager.LoadTaskPrompt(repo, "followup", map[string]string{
+		"Discussion": discussion,
+	})
+	if err != nil {
+		updateComment(formatError("Failed to load prompt template", err))
+		return
+	}
 	taskID := fmt.Sprintf("%s#%d", repo, num)
 	s.log.Info("agent started", "task", taskID, "action", "follow-up")
 	result, err := s.runAgent(repoDir, followUpTimeout, prompt, taskID, true, bot)
@@ -563,30 +576,24 @@ func (s *Server) retryIfNoChanges(repo string, num int, worktreeDir, prompt stri
 
 	s.log.Warn("no changes after first attempt, retrying", "repo", repo, "issue", num)
 
-	var retryPrompt strings.Builder
-	retryPrompt.WriteString("## CRITICAL: Your previous attempt produced ZERO file changes.\n\n")
-	retryPrompt.WriteString("### What went wrong\n")
-	retryPrompt.WriteString("You likely described changes in text instead of using Edit/Write tools to modify files on disk.\n\n")
-	retryPrompt.WriteString("### What you must do NOW\n")
-	retryPrompt.WriteString("1. Use the Edit tool to modify existing files, or Write tool to create new files.\n")
-	retryPrompt.WriteString("2. Do NOT explain or describe — just make the changes.\n")
-	retryPrompt.WriteString("3. After editing, run `git diff` to confirm your changes are on disk.\n\n")
-
+	firstOutput := ""
 	if firstResult != nil && firstResult.Output != "" {
-		text := firstResult.Output
-		if len(text) > 2000 {
-			text = text[:2000] + "\n...(truncated)"
+		firstOutput = firstResult.Output
+		if len(firstOutput) > 2000 {
+			firstOutput = firstOutput[:2000] + "\n...(truncated)"
 		}
-		retryPrompt.WriteString("### Your previous analysis (reuse this — do NOT re-analyze)\n```\n")
-		retryPrompt.WriteString(text)
-		retryPrompt.WriteString("\n```\n\n")
 	}
 
-	retryPrompt.WriteString("### Original task\n")
-	retryPrompt.WriteString(prompt)
+	retryPrompt, err := s.promptManager.LoadTaskPrompt(repo, "retry", map[string]string{
+		"FirstResult":    firstOutput,
+		"OriginalPrompt": prompt,
+	})
+	if err != nil {
+		return "", fmt.Errorf("load retry prompt template: %w", err)
+	}
 
 	onUpdate(progressBody("Retrying (no changes detected)", ""))
-	retryResult, err := s.runAgent(worktreeDir, implementTimeout, retryPrompt.String(), fmt.Sprintf("%s#%d", repo, num), false, bot)
+	retryResult, err := s.runAgent(worktreeDir, implementTimeout, retryPrompt, fmt.Sprintf("%s#%d", repo, num), false, bot)
 	if err != nil {
 		return "", fmt.Errorf("claude retry: %w", err)
 	}
@@ -638,9 +645,13 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 		return
 	}
 
-	prompt := fmt.Sprintf("## Task: Implement GitHub Issue\n\nRead the full discussion below carefully (issue + all comments), then implement ALL necessary code changes.\n\nRequirements:\n- Read existing code before modifying it\n- Follow the project's existing code style and conventions\n- Handle edge cases mentioned in the discussion\n- Make the minimal set of changes needed to fully resolve the issue\n- Ensure the code compiles/runs correctly\n\n### Discussion\n%s", discussion)
-	if extraGuidance != "" {
-		prompt += fmt.Sprintf("\n\n## Additional Guidance from Approver (HIGH PRIORITY)\n\nThe following instruction takes priority over general discussion. Follow it precisely:\n\n%s", extraGuidance)
+	prompt, err := s.promptManager.LoadTaskPrompt(repo, "approve", map[string]string{
+		"Discussion":    discussion,
+		"ExtraGuidance": extraGuidance,
+	})
+	if err != nil {
+		updateComment(formatError("Failed to load prompt template", err))
+		return
 	}
 	taskID := fmt.Sprintf("%s#%d", repo, num)
 	s.log.Info("agent started", "task", taskID, "action", "implementing")
@@ -762,23 +773,12 @@ func (s *Server) runReview(repo string, num int, worktreeDir string, onUpdate fu
 		diff = diff[:maxDiffLen] + "\n... (truncated)"
 	}
 
-	prompt := fmt.Sprintf(`## Task: Code Review (Review Only — Do NOT Modify Files)
-
-You are a senior code reviewer (Gunshi/strategist). Review the following git diff for:
-- Bugs, logic errors, or edge cases
-- Security issues
-- Style inconsistencies with the surrounding codebase
-- Missing error handling
-- Performance concerns
-
-### Rules
-- Do NOT use Edit, Write, or any file-modifying tools. You are a REVIEWER only.
-- Output your review as plain text.
-- If the code looks good and you have no substantive feedback, respond with exactly: LGTM
-- Be concise — focus on actionable issues, not nitpicks.
-
-### Git Diff
-%s`, "```diff\n"+diff+"\n```")
+	prompt, err := s.promptManager.LoadTaskPrompt(repo, "review", map[string]string{
+		"Diff": diff,
+	})
+	if err != nil {
+		return "", fmt.Errorf("load prompt template: %w", err)
+	}
 
 	taskID := fmt.Sprintf("%s#%d", repo, num)
 	onUpdate(progressBody("Polishing (reviewing)", ""))
@@ -797,17 +797,12 @@ func (s *Server) runRefine(repo string, num int, worktreeDir string, reviewText 
 		reviewText = reviewText[:5000] + "\n... (truncated)"
 	}
 
-	prompt := fmt.Sprintf(`## Task: Apply Code Review Feedback
-
-A senior reviewer has examined your implementation and found issues. Apply their feedback by making the necessary code changes.
-
-### Rules
-- Use Edit tool to fix the issues identified below.
-- Only fix what the review calls out — do not make unrelated changes.
-- After fixing, run "git diff" to verify your changes are on disk.
-
-### Review Feedback
-%s`, reviewText)
+	prompt, err := s.promptManager.LoadTaskPrompt(repo, "refine", map[string]string{
+		"ReviewText": reviewText,
+	})
+	if err != nil {
+		return fmt.Errorf("load prompt template: %w", err)
+	}
 
 	taskID := fmt.Sprintf("%s#%d", repo, num)
 	onUpdate(progressBody("Polishing (refining)", ""))
@@ -858,27 +853,16 @@ func (s *Server) generatePRDescription(repo string, num int, issueTitle string, 
 		diff = diff[:maxDiffLen] + "\n... (truncated)"
 	}
 
-	prompt := fmt.Sprintf(`## Task: Generate Pull Request Description
-
-Write a concise but informative pull request description based on the issue and code changes below.
-
-### Requirements
-- Start with "Closes #%d" on the first line
-- Include a brief summary of what was changed and why
-- List the key changes made (bullet points)
-- Mention files modified if relevant
-- Keep it under 300 words
-- Do NOT include code blocks or diff output
-- Write in English
-- Output ONLY the PR description text, nothing else
-
-### Issue: %s
-
-### Code Changes (diff stat)
-%s
-
-### Full Diff
-%s`, num, issueTitle, stat, "```diff\n"+diff+"\n```")
+	prompt, err := s.promptManager.LoadTaskPrompt(repo, "pr-desc", map[string]any{
+		"Num":        num,
+		"IssueTitle": issueTitle,
+		"Stat":       stat,
+		"Diff":       diff,
+	})
+	if err != nil {
+		s.log.Warn("generatePRDescription: failed to load prompt template", "error", err)
+		return fmt.Sprintf("Closes #%d\n\nImplemented automatically by Claude.", num)
+	}
 
 	taskID := fmt.Sprintf("%s#%d-pr-desc", repo, num)
 	result, err := s.runAgent(worktreeDir, 2*time.Minute, prompt, taskID, true, bot)
@@ -938,9 +922,13 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 		return
 	}
 
-	prompt := fmt.Sprintf("## Task: Implement PR Changes\n\nRead the full PR discussion below (description + all comments). The latest comment is a request directed at you.\n\nRequirements:\n- Read existing code before modifying it\n- Follow the project's existing code style and conventions\n- Make only the changes requested in the latest comment\n- Ensure the code compiles/runs correctly\n\n### PR Discussion\n%s", discussion)
-	if extraGuidance != "" {
-		prompt += fmt.Sprintf("\n\n## Additional Guidance (HIGH PRIORITY)\n\nThe following instruction takes priority. Follow it precisely:\n\n%s", extraGuidance)
+	prompt, err := s.promptManager.LoadTaskPrompt(repo, "pr-implement", map[string]string{
+		"Discussion":    discussion,
+		"ExtraGuidance": extraGuidance,
+	})
+	if err != nil {
+		updateComment(formatError("Failed to load prompt template", err))
+		return
 	}
 
 	taskID := fmt.Sprintf("%s#%d", repo, num)

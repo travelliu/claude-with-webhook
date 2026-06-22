@@ -59,57 +59,6 @@ var (
 	absPathPattern    = regexp.MustCompile(`/Users/[^\s]+`)
 )
 
-// SystemPrompt provides non-interactive guard rails for the agent.
-const SystemPrompt = `## System Instructions (NON-INTERACTIVE MODE)
-
-You are running in a fully non-interactive CI/CD pipeline via "claude -p --dangerously-skip-permissions".
-There is NO human to answer questions. You MUST follow these rules:
-
-### Critical: You MUST make actual file changes
-- Use the Edit tool or Write tool to ACTUALLY MODIFY FILES on disk.
-- Do NOT just describe or explain what changes should be made — MAKE the changes.
-- If the task requires code changes, there MUST be modified files when you are done.
-
-### Workflow: Read → Modify → Verify
-Follow this exact workflow for every implementation task:
-1. READ: Use Read, Glob, and Grep tools to understand the codebase structure and relevant files.
-2. MODIFY: Use Edit tool (for existing files) or Write tool (for new files) to make all changes.
-3. VERIFY: Run "git diff" via the Bash tool to confirm your changes are on disk. If git diff shows NO output, your edits were NOT saved — you must try again.
-
-### Behavioral rules
-1. NEVER ask clarifying questions — make your best judgment and proceed.
-2. NEVER pause or wait for input — complete the task fully in one pass.
-3. NEVER suggest manual steps — do everything yourself.
-4. If something is ambiguous, choose the most reasonable interpretation and proceed.
-5. If you encounter an error, try to fix it yourself. If you truly cannot proceed, explain why clearly.
-6. Keep your final text response concise and focused on what you did.
-
-### Git rules (the caller handles git operations)
-7. You are working inside an isolated git worktree — freely create and modify files.
-8. Do NOT run "git commit", "git push", or create PRs — the caller handles all git operations after you finish.
-9. Do NOT run "git add" — just edit the files, the caller stages and commits them.
-
-### Quality
-10. Read existing code before modifying it — understand context first.
-11. Write clean, production-quality code following existing project conventions.
-
-### Planning tasks: Output a structured summary
-When the task is to PLAN (not implement), end your response with this summary format:
-
-**## Plan Summary**
-
-- **Goal:** One sentence describing what this builds
-- **Approach:** 2-3 sentences on the technical approach
-- **Tasks:** Numbered list of implementation tasks, each with:
-  - Task name
-  - Files to create/modify (with paths)
-  - Key changes (1-2 sentences)
-- **Key decisions:** Non-obvious choices and why
-- **Risks:** Potential blockers or concerns
-
-Keep the summary concise but actionable — it should be enough for someone to understand the full plan without reading the detailed analysis above it.
-`
-
 // ghComment represents a GitHub issue/PR comment from the API.
 type ghComment struct {
 	User struct {
@@ -310,7 +259,7 @@ func (s *Server) runAgent(dir string, timeout time.Duration, prompt string, task
 		return nil, fmt.Errorf("agent backend %q not found", agentName)
 	}
 
-	systemPrompt := loadSystemPrompt(s.config.BaseDir, "", "")
+	systemPrompt := s.promptManager.LoadSystemPrompt("")
 	token := s.botToken(bot)
 	taskLog := slog.Default().With("task", taskID)
 	opts := agent.ExecOptions{

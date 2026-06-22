@@ -179,6 +179,14 @@ func runRepoRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("register repo: %w", err)
 	}
 
+	// Step 5b: Ensure default prompt templates for this repo
+	pm := server.NewPromptManager(baseDir)
+	if err := pm.EnsureDefaultPrompts(repoInfo.NameWithOwner); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to setup prompt templates: %v\n", err)
+	} else {
+		fmt.Println("Prompt templates configured.")
+	}
+
 	// Step 6: Configure webhook (requires PUBLIC_URL or tunnel running)
 	publicURL := os.Getenv("PUBLIC_URL")
 	if !skipWebhook && publicURL != "" {
