@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -29,15 +30,25 @@ type ghAccountEntry struct {
 	Scopes string `json:"scopes"`
 }
 
-// AuthStatus uses `gh auth status --json` to extract logged-in accounts.
+// AuthStatus uses `gh auth status` to extract logged-in accounts.
+// Tries `--json hosts` first (gh >= 2.40), falls back to parsing text output.
 func AuthStatus() ([]Account, error) {
-	out, err := exec.Command("gh", "auth", "status", "--json", "hosts").Output()
-	if err != nil {
-		return nil, fmt.Errorf("gh auth status: %w", err)
+	out, err := exec.Command("gh", "auth", "status", "--json", "hosts").CombinedOutput()
+	if err == nil {
+		return parseAuthStatusJSON(out)
 	}
+	// Fallback: parse text output (works with all gh versions).
+	out, err = exec.Command("gh", "auth", "status").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("gh auth status: %s", strings.TrimSpace(string(out)))
+	}
+	return parseAuthStatusText(string(out))
+}
 
+// parseAuthStatusJSON parses the JSON output of `gh auth status --json hosts`.
+func parseAuthStatusJSON(data []byte) ([]Account, error) {
 	var raw ghAuthStatusJSON
-	if err := json.Unmarshal(out, &raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parse gh auth status: %w", err)
 	}
 
@@ -58,15 +69,77 @@ func AuthStatus() ([]Account, error) {
 	return accounts, nil
 }
 
+// accountLinePattern matches lines like:
+//   ✓ Logged in to github.com account travelliu (keyring)
+//   ✗ Logged in to github.com account travelliu (keyring)
+var accountLinePattern = regexp.MustCompile(`[✓✗]\s+Logged in to (\S+) account (\S+)`)
+
+// scopePattern matches lines like:
+//   - Token scopes: 'admin:repo_hook', 'repo', 'workflow'
+var scopePattern = regexp.MustCompile(`Token scopes:\s*(.+)`)
+
+// parseAuthStatusText parses the text output of `gh auth status` (without --json).
+func parseAuthStatusText(output string) ([]Account, error) {
+	var accounts []Account
+	var currentHost string
+	var currentLogin string
+	var active bool
+	var scopes string
+
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		if m := accountLinePattern.FindStringSubmatch(line); m != nil {
+			// Flush previous account if any.
+			if currentLogin != "" {
+				accounts = append(accounts, Account{
+					Username: currentLogin,
+					Instance: currentHost,
+					Active:   active,
+					Scopes:   scopes,
+				})
+			}
+			currentHost = m[1]
+			currentLogin = m[2]
+			active = false
+			scopes = ""
+			continue
+		}
+
+		if strings.Contains(line, "Active account: true") {
+			active = true
+		}
+
+		if m := scopePattern.FindStringSubmatch(line); m != nil {
+			scopes = strings.ReplaceAll(m[1], "'", "")
+			scopes = strings.ReplaceAll(scopes, " ", "")
+		}
+	}
+
+	// Flush the last account.
+	if currentLogin != "" {
+		accounts = append(accounts, Account{
+			Username: currentLogin,
+			Instance: currentHost,
+			Active:   active,
+			Scopes:   scopes,
+		})
+	}
+
+	if len(accounts) == 0 {
+		return nil, fmt.Errorf("no accounts found in gh auth status output")
+	}
+	return accounts, nil
+}
+
 // GetToken retrieves the auth token for a given user via `gh auth token`.
 func GetToken(username string) (string, error) {
 	args := []string{"auth", "token"}
 	if username != "" {
 		args = append(args, "-u", username)
 	}
-	out, err := exec.Command("gh", args...).Output()
+	out, err := exec.Command("gh", args...).CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("gh auth token: %w", err)
+		return "", fmt.Errorf("gh auth token: %s", strings.TrimSpace(string(out)))
 	}
 	token := strings.TrimSpace(string(out))
 	if token == "" {
@@ -90,9 +163,9 @@ func GetCurrentRepo() (*RepoInfo, error) {
 // GetCurrentRepoWithToken returns repo info using a specific token.
 func GetCurrentRepoWithToken(token string) (*RepoInfo, error) {
 	cmd := ghWithToken(token, "repo", "view", "--json", "nameWithOwner,url,defaultBranchRef")
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("gh repo view: %w", err)
+		return nil, fmt.Errorf("gh repo view: %s", strings.TrimSpace(string(out)))
 	}
 	var raw struct {
 		NameWithOwner    string `json:"nameWithOwner"`
@@ -123,9 +196,9 @@ type WebhookConfig struct {
 func EnsureWebhook(repo string, cfg WebhookConfig) error {
 	jqFilter := fmt.Sprintf(`.[] | select(.config.url == "%s") | .id`, cfg.URL)
 	listCmd := ghWithToken(cfg.Token, "api", fmt.Sprintf("repos/%s/hooks", repo), "--jq", jqFilter)
-	out, err := listCmd.Output()
+	out, err := listCmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("list hooks: %w", err)
+		return fmt.Errorf("list hooks: %s", strings.TrimSpace(string(out)))
 	}
 
 	existingID := strings.TrimSpace(string(out))

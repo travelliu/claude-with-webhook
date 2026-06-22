@@ -28,9 +28,9 @@ func NewClient() *Client {
 // GetWebhooks gets all webhooks for a repository
 func (c *Client) GetWebhooks(repo string) ([]Webhook, error) {
 	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/hooks", repo),
-		"--jq", ".[] | select(.config.url | endswith(\"/webhook\")) | {id: .id, url: .config.url, active: .active}").Output()
+		"--jq", ".[] | select(.config.url | endswith(\"/webhook\")) | {id: .id, url: .config.url, active: .active}").CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("get webhooks: %w", err)
+		return nil, fmt.Errorf("get webhooks: %s", strings.TrimSpace(string(out)))
 	}
 
 	if len(out) == 0 {
@@ -140,9 +140,9 @@ func (c *Client) getAuthScopes() (string, error) {
 func (c *Client) CheckPermission(repo, username string) (bool, error) {
 	out, err := exec.Command("gh", "api",
 		fmt.Sprintf("repos/%s/collaborators/%s/permission", repo, username),
-		"--jq", ".permission").Output()
+		"--jq", ".permission").CombinedOutput()
 	if err != nil {
-		return false, fmt.Errorf("check permission: %w", err)
+		return false, fmt.Errorf("check permission: %s", strings.TrimSpace(string(out)))
 	}
 
 	perm := strings.TrimSpace(string(out))
@@ -158,9 +158,9 @@ func (c *Client) CheckPermission(repo, username string) (bool, error) {
 func (c *Client) GetCurrentRepo(dir string) (string, error) {
 	cmd := exec.Command("gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
 	cmd.Dir = dir
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("get current repo: %w", err)
+		return "", fmt.Errorf("get current repo: %s", strings.TrimSpace(string(out)))
 	}
 
 	repo := strings.TrimSpace(string(out))

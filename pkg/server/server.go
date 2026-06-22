@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"claude-with-webhook/pkg/agent"
+	"claude-with-webhook/pkg/ghutil"
 	"claude-with-webhook/pkg/github"
 	pkglog "claude-with-webhook/pkg/logger"
 	"claude-with-webhook/pkg/tunnel"
@@ -190,10 +191,26 @@ func (s *Server) checkAndUpdateWebhooks() error {
 		s.log.Info("current tunnel URL", "url", baseURL)
 	}
 
+	hasScope, err := ghutil.CheckScope()
+	if err != nil {
+		s.log.Warn("gh auth status check failed", "error", err)
+	}
+	if !hasScope {
+		s.log.Error("missing required permission, webhook management disabled",
+			"required_scope", "admin:repo_hook",
+			"fix_command", "gh auth refresh -h github.com -s admin:repo_hook")
+		return nil
+	}
+
 	repos := s.config.GetAllRepos()
 	for repo := range repos {
 		if err := s.checkAndUpdateRepoWebhook(repo, baseURL); err != nil {
-			s.log.Error("webhook check failed", "repo", repo, "error", err)
+			expectedURL := fmt.Sprintf("%s/%s/webhook", baseURL, repo)
+			s.log.Error("webhook check failed, please configure manually",
+				"repo", repo,
+				"expected_url", expectedURL,
+				"secret", s.config.WebhookSecret,
+				"error", err)
 		}
 	}
 
