@@ -711,20 +711,26 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 	prURL = strings.TrimSpace(prURL)
 	s.setIssueLabel(repo, repoDir, num, "review", token)
 
+	// Build final comment with agent summary + PR link
+	summary := strings.TrimSpace(result.Output)
+	footer := fmt.Sprintf("PR created: %s", prURL)
 	if autoMerge {
 		if _, err := runCmdWithToken(worktreeDir, gitTimeout, token, "gh", "pr", "merge", "--squash", "--repo", repo, branch); err == nil {
 			s.log.Info("PR merged directly", "repo", repo, "issue", num, "pr_url", prURL)
 			s.setIssueLabel(repo, repoDir, num, "done", token)
-			s.postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created and merged: %s", prURL), token)
+			footer = fmt.Sprintf("PR created and merged: %s", prURL)
 		} else if _, err := runCmdWithToken(worktreeDir, gitTimeout, token, "gh", "pr", "merge", "--auto", "--squash", "--repo", repo, branch); err == nil {
 			s.log.Info("auto-merge enabled", "repo", repo, "issue", num, "pr_url", prURL)
-			s.postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n✅ Auto-merge enabled (will merge when CI passes)", prURL), token)
+			footer = fmt.Sprintf("PR created: %s\n\n✅ Auto-merge enabled (will merge when CI passes)", prURL)
 		} else {
 			s.log.Error("auto-merge failed", "repo", repo, "issue", num, "error", err)
-			s.postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s\n\n⚠️ Auto-merge failed — please merge manually", prURL), token)
+			footer = fmt.Sprintf("PR created: %s\n\n⚠️ Auto-merge failed — please merge manually", prURL)
 		}
+	}
+	if summary != "" {
+		s.postIssueComment(repo, repoDir, num, summary+"\n\n---\n"+footer, token)
 	} else {
-		s.postIssueComment(repo, repoDir, num, fmt.Sprintf("PR created: %s", prURL), token)
+		s.postIssueComment(repo, repoDir, num, footer, token)
 	}
 	success = true
 
