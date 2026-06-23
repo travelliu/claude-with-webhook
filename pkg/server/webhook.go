@@ -545,6 +545,7 @@ func (s *Server) handleFollowUp(repo, repoDir string, num int, p webhookPayload,
 
 	prompt, err := s.promptManager.LoadTaskPrompt(repo, "followup", map[string]string{
 		"Discussion": discussion,
+		"Prefix":     bot.Prefix,
 	})
 	if err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to load prompt template", err), token)

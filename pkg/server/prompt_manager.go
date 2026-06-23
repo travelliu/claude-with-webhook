@@ -281,7 +281,7 @@ Read the full GitHub issue discussion below (original issue + all comments). The
 - Do NOT implement changes — you are in discussion mode only
 - Explain what changes would be needed: which files, what modifications
 - Outline the approach and any trade-offs
-- Suggest using ` + "`@claude approve`" + ` to trigger implementation
+- Suggest using ` + "`{{.Prefix}} approve`" + ` to trigger implementation
 
 **If the comment is ambiguous:**
 - Ask for clarification by listing possible interpretations
