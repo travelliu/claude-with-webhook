@@ -130,6 +130,27 @@ func runBotAdd(cmd *cobra.Command, _ []string) error {
 		agentName = "claude"
 	}
 
+	// Prompt for git identity if not provided via flags
+	reader := bufio.NewReader(os.Stdin)
+	if gitName == "" {
+		fmt.Printf("Git commit author name (default: %s): ", username)
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "" {
+			gitName = username
+		} else {
+			gitName = input
+		}
+	}
+	if gitEmail == "" {
+		fmt.Print("Git commit author email (required for git commit): ")
+		input, _ := reader.ReadString('\n')
+		gitEmail = strings.TrimSpace(input)
+		if gitEmail == "" {
+			return fmt.Errorf("git-email is required — git commit will fail without it")
+		}
+	}
+
 	bots, err := server.LoadBots(baseDir)
 	if err != nil {
 		return err
