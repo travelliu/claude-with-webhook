@@ -258,6 +258,12 @@ Read the full discussion below carefully (issue + all comments), then implement 
 - Ensure the code compiles/runs correctly
 - Do NOT run git commit/push/add — the caller handles that
 
+### Final Output (REQUIRED)
+After completing all changes, output a **Summary of Changes** section with:
+- A one-paragraph summary of what was implemented
+- A bullet list of each file changed and what was modified (file path + 1-sentence description)
+- Any notes on edge cases, assumptions, or limitations
+
 ### Discussion
 {{.Discussion}}{{if .ExtraGuidance}}
 
