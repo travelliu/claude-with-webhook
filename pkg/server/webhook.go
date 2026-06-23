@@ -624,10 +624,12 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 		return
 	}
 
+	s.log.Info("creating worktree", "repo", repo, "issue", num, "branch", branch, "dir", worktreeDir)
 	if _, err := runCmd(repoDir, gitTimeout, "git", "worktree", "add", worktreeDir, "-b", branch, "origin/main"); err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to create worktree", err), token)
 		return
 	}
+	s.log.Info("worktree created", "repo", repo, "issue", num, "branch", branch, "dir", worktreeDir)
 
 	success := false
 	defer func() {
@@ -682,14 +684,17 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 		return
 	}
 	addArgs := append([]string{"add", "--"}, filesToAdd...)
+	s.log.Info("staging files", "repo", repo, "issue", num, "files", len(filesToAdd), "dir", worktreeDir)
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", addArgs...); err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to stage changes", err), token)
 		return
 	}
+	s.log.Info("committing changes", "repo", repo, "issue", num, "msg", commitMsg, "dir", worktreeDir, "gitName", s.botGitName(bot), "gitEmail", s.botGitEmail(bot))
 	if _, err := runCmdWithGitConfig(worktreeDir, gitTimeout, s.botGitName(bot), s.botGitEmail(bot), "git", "commit", "-m", commitMsg); err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to commit", err), token)
 		return
 	}
+	s.log.Info("pushing branch", "repo", repo, "issue", num, "branch", branch, "dir", worktreeDir)
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", "push", "-u", "origin", branch); err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to push branch", err), token)
 		return
@@ -897,10 +902,12 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to fetch PR branch", err), token)
 		return
 	}
+	s.log.Info("creating worktree for PR", "repo", repo, "pr", num, "branch", branch, "dir", worktreeDir)
 	if _, err := runCmd(repoDir, gitTimeout, "git", "worktree", "add", worktreeDir, "origin/"+branch); err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to create worktree for PR branch", err), token)
 		return
 	}
+	s.log.Info("worktree created for PR", "repo", repo, "pr", num, "branch", branch, "dir", worktreeDir)
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", "checkout", "-B", branch, "origin/"+branch); err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to checkout PR branch", err), token)
 		cleanupWorktree(repoDir, worktreeDir, "")
@@ -954,14 +961,17 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 		return
 	}
 	addArgs := append([]string{"add", "--"}, filesToAdd...)
+	s.log.Info("staging files for PR", "repo", repo, "pr", num, "files", len(filesToAdd), "dir", worktreeDir)
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", addArgs...); err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to stage changes", err), token)
 		return
 	}
+	s.log.Info("committing changes for PR", "repo", repo, "pr", num, "msg", commitMsg, "dir", worktreeDir, "gitName", s.botGitName(bot), "gitEmail", s.botGitEmail(bot))
 	if _, err := runCmdWithGitConfig(worktreeDir, gitTimeout, s.botGitName(bot), s.botGitEmail(bot), "git", "commit", "-m", commitMsg); err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to commit", err), token)
 		return
 	}
+	s.log.Info("pushing PR changes", "repo", repo, "pr", num, "branch", branch, "dir", worktreeDir)
 	if _, err := runCmd(worktreeDir, gitTimeout, "git", "push", "origin", branch); err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to push changes", err), token)
 		return
