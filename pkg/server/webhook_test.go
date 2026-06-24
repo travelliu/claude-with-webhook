@@ -145,6 +145,17 @@ func TestFilterSafeFiles(t *testing.T) {
 			input:    "?? .env\n?? secret.pem",
 			expected: nil,
 		},
+		{
+			name:     "source code files with token/secret/credential pass through",
+			input:    " M token_service.go\n M secret_manager.py\n M credential_validator.ts\n M auth_token.js",
+			expected: []string{"token_service.go", "secret_manager.py", "credential_validator.ts", "auth_token.js"},
+		},
+		{
+			name:     "mixed source code and config files",
+			input:    " M token_service.go\n?? credentials.json\n M secret_manager.py\n?? token_cache.yaml",
+			expected: []string{"token_service.go", "secret_manager.py"},
+			skipped:  []string{"credentials.json", "token_cache.yaml"},
+		},
 	}
 
 	for _, tt := range tests {
