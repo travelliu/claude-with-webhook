@@ -17,6 +17,7 @@ type BotConfig struct {
 	GitEmail string `yaml:"git_email" json:"git_email"` // git commit author email
 	Prefix   string `yaml:"prefix"   json:"prefix"`     // e.g. "@claude"
 	Agent    string `yaml:"agent"    json:"agent"`       // "claude" (future: "kimicode", etc.)
+	GHBin    string `yaml:"gh_bin"   json:"gh_bin"`     // custom gh binary path (default: "gh")
 }
 
 // BotsFile is the top-level structure of bots.yaml.

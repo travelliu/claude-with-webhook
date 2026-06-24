@@ -71,7 +71,7 @@ func (s *Server) isUserAllowed(repo, username string) bool {
 	if rc, ok := s.config.GetRepoConfig(repo); ok && rc.WebhookToken != "" {
 		token = rc.WebhookToken
 	}
-	output, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "api",
+	output, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(nil), "api",
 		fmt.Sprintf("repos/%s/collaborators/%s/permission", repo, username),
 		"--jq", ".permission")
 	if err != nil {
@@ -204,12 +204,12 @@ func (s *Server) handlePlan(repo, repoDir string, num int, p webhookPayload, bot
 	s.log.Info("re-planning issue via comment", "repo", repo, "issue", num)
 
 	token := s.botToken(bot)
-	title, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--json", "title,body", "--jq", ".title")
+	title, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(bot), "issue", "view", strconv.Itoa(num), "--repo", repo, "--json", "title,body", "--jq", ".title")
 	if err != nil {
 		s.commentError(repo, repoDir, num, "Failed to fetch issue details", err, token)
 		return
 	}
-	body, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "issue", "view", strconv.Itoa(num), "--repo", repo, "--json", "body", "--jq", ".body")
+	body, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(bot), "issue", "view", strconv.Itoa(num), "--repo", repo, "--json", "body", "--jq", ".body")
 	if err != nil {
 		s.commentError(repo, repoDir, num, "Failed to fetch issue details", err, token)
 		return
@@ -484,11 +484,11 @@ func (s *Server) fetchDiscussion(repoDir, repo string, num int, kind string, bot
 	var titleBody string
 	var err error
 	if kind == "pr" {
-		titleBody, err = runCmdWithToken(repoDir, gitTimeout, token, "gh", "pr", "view", numStr,
+		titleBody, err = runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(bot), "pr", "view", numStr,
 			"--repo", repo, "--json", "title,body",
 			"--jq", `"# " + .title + "\n\n" + (.body // "")`)
 	} else {
-		titleBody, err = runCmdWithToken(repoDir, gitTimeout, token, "gh", "issue", "view", numStr,
+		titleBody, err = runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(bot), "issue", "view", numStr,
 			"--repo", repo, "--json", "title,body",
 			"--jq", `"# " + .title + "\n\n" + (.body // "")`)
 	}
@@ -496,24 +496,24 @@ func (s *Server) fetchDiscussion(repoDir, repo string, num int, kind string, bot
 		return "", fmt.Errorf("fetch %s title/body: %w", kind, err)
 	}
 
-	commentsRaw, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "api",
+	commentsRaw, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(bot), "api",
 		fmt.Sprintf("repos/%s/issues/%d/comments", repo, num),
 		"--paginate")
 	if err != nil {
 		s.log.Warn("fetchDiscussion API fallback", "repo", repo, "issue", num, "error", err)
 		if kind == "pr" {
-			return runCmdWithToken(repoDir, gitTimeout, token, "gh", "pr", "view", numStr, "--repo", repo, "--comments")
+			return runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(bot), "pr", "view", numStr, "--repo", repo, "--comments")
 		}
-		return runCmdWithToken(repoDir, gitTimeout, token, "gh", "issue", "view", numStr, "--repo", repo, "--comments")
+		return runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(bot), "issue", "view", numStr, "--repo", repo, "--comments")
 	}
 
 	var comments []ghComment
 	if err := json.Unmarshal([]byte(commentsRaw), &comments); err != nil {
 		s.log.Warn("fetchDiscussion JSON parse fallback", "repo", repo, "issue", num, "error", err)
 		if kind == "pr" {
-			return runCmdWithToken(repoDir, gitTimeout, token, "gh", "pr", "view", numStr, "--repo", repo, "--comments")
+			return runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(bot), "pr", "view", numStr, "--repo", repo, "--comments")
 		}
-		return runCmdWithToken(repoDir, gitTimeout, token, "gh", "issue", "view", numStr, "--repo", repo, "--comments")
+		return runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(bot), "issue", "view", numStr, "--repo", repo, "--comments")
 	}
 
 	// Determine bot username for noise filtering
@@ -718,7 +718,7 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 
 	prTitle := fmt.Sprintf("Fix #%d: %s", num, title)
 	prBody := s.generatePRDescription(repo, num, title, worktreeDir, bot)
-	prURL, err := runCmdWithToken(worktreeDir, gitTimeout, token, "gh", "pr", "create", "--title", prTitle, "--body", prBody, "--repo", repo)
+	prURL, err := runCmdWithToken(worktreeDir, gitTimeout, token, s.ghBin(bot), "pr", "create", "--title", prTitle, "--body", prBody, "--repo", repo)
 	if err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to create PR", err), token)
 		return
@@ -731,11 +731,11 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 	summary := strings.TrimSpace(result.Output)
 	footer := fmt.Sprintf("PR created: %s", prURL)
 	if autoMerge {
-		if _, err := runCmdWithToken(worktreeDir, gitTimeout, token, "gh", "pr", "merge", "--squash", "--repo", repo, branch); err == nil {
+		if _, err := runCmdWithToken(worktreeDir, gitTimeout, token, s.ghBin(bot), "pr", "merge", "--squash", "--repo", repo, branch); err == nil {
 			s.log.Info("PR merged directly", "repo", repo, "issue", num, "pr_url", prURL)
 			s.setIssueLabel(repo, repoDir, num, "done", token)
 			footer = fmt.Sprintf("PR created and merged: %s", prURL)
-		} else if _, err := runCmdWithToken(worktreeDir, gitTimeout, token, "gh", "pr", "merge", "--auto", "--squash", "--repo", repo, branch); err == nil {
+		} else if _, err := runCmdWithToken(worktreeDir, gitTimeout, token, s.ghBin(bot), "pr", "merge", "--auto", "--squash", "--repo", repo, branch); err == nil {
 			s.log.Info("auto-merge enabled", "repo", repo, "issue", num, "pr_url", prURL)
 			footer = fmt.Sprintf("PR created: %s\n\n✅ Auto-merge enabled (will merge when CI passes)", prURL)
 		} else {
@@ -910,7 +910,7 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 	s.log.Info("handling PR comment", "repo", repo, "issue", num)
 
 	token := s.botToken(bot)
-	branch, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "pr", "view", strconv.Itoa(num),
+	branch, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(bot), "pr", "view", strconv.Itoa(num),
 		"--repo", repo, "--json", "headRefName", "--jq", ".headRefName")
 	if err != nil {
 		s.postIssueComment(repo, repoDir, num, formatError("Failed to get PR branch name", err), token)

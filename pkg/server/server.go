@@ -58,6 +58,7 @@ type Config struct {
 	Port           string
 	BaseDir        string
 	PublicURL      string // User-provided public URL (skip tunnel)
+	GHBin          string // custom gh binary path (env: GH_BIN, default: "gh")
 
 	reposMu sync.RWMutex
 	repos   map[string]RepoConfig
@@ -472,6 +473,7 @@ func NewConfig(baseDir string) (*Config, error) {
 		Port:            port,
 		BaseDir:         baseDir,
 		PublicURL:       publicURL,
+		GHBin:           os.Getenv("GH_BIN"),
 		repos:           repos,
 	}, nil
 }

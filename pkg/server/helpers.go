@@ -130,7 +130,7 @@ func runCmdWithToken(dir string, timeout time.Duration, token string, name strin
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	if token != "" {
-		cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+token)
+		cmd.Env = append(os.Environ(), "GH_TOKEN="+token, "GITHUB_TOKEN="+token)
 	}
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
@@ -203,7 +203,7 @@ func runCmdWithStdin(dir string, timeout time.Duration, token string, stdin stri
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	if token != "" {
-		cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+token)
+		cmd.Env = append(os.Environ(), "GH_TOKEN="+token, "GITHUB_TOKEN="+token)
 	}
 	cmd.Stdin = strings.NewReader(stdin)
 	start := time.Now()
@@ -270,6 +270,18 @@ func (s *Server) botGitEmail(bot *BotConfig) string {
 	return s.config.BotGitEmail
 }
 
+// ghBin returns the gh CLI binary path for the given bot.
+// Priority: bot.GHBin > config.GHBin > "gh".
+func (s *Server) ghBin(bot *BotConfig) string {
+	if bot != nil && bot.GHBin != "" {
+		return bot.GHBin
+	}
+	if s.config.GHBin != "" {
+		return s.config.GHBin
+	}
+	return "gh"
+}
+
 // runAgent executes a prompt via the specified agent backend.
 // If bot is nil, falls back to "claude" backend with legacy config.
 func (s *Server) runAgent(dir string, timeout time.Duration, prompt string, taskID string, finalOnly bool, bot *BotConfig) (*agent.Result, error) {
@@ -292,7 +304,8 @@ func (s *Server) runAgent(dir string, timeout time.Duration, prompt string, task
 		SystemPrompt: systemPrompt,
 		Logger:       taskLog,
 		Env: map[string]string{
-			"GITHUB_TOKEN": token,
+			"GH_TOKEN":      token,
+			"GITHUB_TOKEN":  token,
 		},
 	}
 
@@ -352,7 +365,7 @@ func (s *Server) postIssueComment(repo, repoDir string, num int, body string, to
 	if token == "" {
 		token = s.config.BotGitHubToken
 	}
-	_, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "issue", "comment", strconv.Itoa(num), "--repo", repo, "--body", body)
+	_, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(nil), "issue", "comment", strconv.Itoa(num), "--repo", repo, "--body", body)
 	return err
 }
 
@@ -361,7 +374,7 @@ func (s *Server) postProgressComment(repo, repoDir string, num int, placeholder 
 	if token == "" {
 		token = s.config.BotGitHubToken
 	}
-	out, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "api",
+	out, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(nil), "api",
 		fmt.Sprintf("repos/%s/issues/%d/comments", repo, num),
 		"-X", "POST",
 		"-f", "body="+placeholder,
@@ -378,13 +391,13 @@ func (s *Server) postProgressComment(repo, repoDir string, num int, placeholder 
 
 	update = func(body string) {
 		jsonBody, _ := json.Marshal(map[string]string{"body": body})
-		_, err := runCmdWithStdin(repoDir, gitTimeout, token, string(jsonBody), "gh", "api",
+		_, err := runCmdWithStdin(repoDir, gitTimeout, token, string(jsonBody), s.ghBin(nil), "api",
 			fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
 			"-X", "PATCH",
 			"--input", "-")
 		if err != nil {
 			slog.Error("failed to update comment, posting new", "repo", repo, "issue", num, "comment_id", commentID, "error", err)
-			runCmdWithToken(repoDir, gitTimeout, token, "gh", "api",
+			runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(nil), "api",
 				fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
 				"-X", "DELETE")
 			s.postIssueComment(repo, repoDir, num, body, token)
@@ -392,7 +405,7 @@ func (s *Server) postProgressComment(repo, repoDir string, num int, placeholder 
 	}
 
 	delete = func() {
-		_, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "api",
+		_, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(nil), "api",
 			fmt.Sprintf("repos/%s/issues/comments/%s", repo, commentID),
 			"-X", "DELETE")
 		if err != nil {
@@ -413,18 +426,18 @@ func (s *Server) setIssueLabel(repo, repoDir string, num int, label string, toke
 	}
 
 	endpoint := fmt.Sprintf("repos/%s/issues/%d/labels", repo, num)
-	out, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "api", endpoint, "--jq", ".[].name")
+	out, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(nil), "api", endpoint, "--jq", ".[].name")
 	if err == nil {
 		for _, existing := range strings.Split(strings.TrimSpace(out), "\n") {
 			existing = strings.TrimSpace(existing)
 			if existing != label && workflowLabels[existing] {
 				rmEndpoint := fmt.Sprintf("repos/%s/issues/%d/labels/%s", repo, num, existing)
-				exec.Command("gh", "api", rmEndpoint, "--method", "DELETE").Run()
+				runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(nil), "api", rmEndpoint, "--method", "DELETE")
 			}
 		}
 	}
 
-	_, err = runCmdWithToken(repoDir, gitTimeout, token, "gh", "api", endpoint, "-f", fmt.Sprintf("labels[]=%s", label))
+	_, err = runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(nil), "api", endpoint, "-f", fmt.Sprintf("labels[]=%s", label))
 	if err != nil {
 		slog.Error("failed to set label", "repo", repo, "issue", num, "label", label, "error", err)
 	}
@@ -436,7 +449,7 @@ func (s *Server) reactToIssue(repo, repoDir string, num int, token string) {
 		token = s.config.BotGitHubToken
 	}
 	endpoint := fmt.Sprintf("repos/%s/issues/%d/reactions", repo, num)
-	_, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "api", endpoint, "-f", "content=eyes")
+	_, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(nil), "api", endpoint, "-f", "content=eyes")
 	if err != nil {
 		slog.Error("failed to react to issue", "issue", num, "error", err)
 	}
@@ -448,7 +461,7 @@ func (s *Server) reactToComment(repo, repoDir string, commentID int, token strin
 		token = s.config.BotGitHubToken
 	}
 	endpoint := fmt.Sprintf("repos/%s/issues/comments/%d/reactions", repo, commentID)
-	_, err := runCmdWithToken(repoDir, gitTimeout, token, "gh", "api", endpoint, "-f", "content=eyes")
+	_, err := runCmdWithToken(repoDir, gitTimeout, token, s.ghBin(nil), "api", endpoint, "-f", "content=eyes")
 	if err != nil {
 		slog.Error("failed to react to comment", "comment_id", commentID, "error", err)
 	}
