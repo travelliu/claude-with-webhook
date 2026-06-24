@@ -54,6 +54,30 @@ var (
 		"node_modules/", ".git/",
 	}
 
+	// Source code extensions that should not be filtered by credential/secret/token patterns.
+	// Files with these extensions are legitimate source code, not secrets.
+	// This prevents false positives where source files like token_service.go get filtered.
+	sourceCodeExtensions = map[string]bool{
+		".go": true, ".py": true, ".js": true, ".ts": true, ".tsx": true, ".jsx": true,
+		".java": true, ".c": true, ".cpp": true, ".h": true, ".hpp": true,
+		".rs": true, ".rb": true, ".php": true, ".swift": true, ".kt": true,
+		".scala": true, ".cs": true, ".vb": true, ".fs": true,
+		".html": true, ".css": true, ".scss": true, ".less": true,
+		".vue": true, ".svelte": true, ".astro": true,
+		".sql": true, ".graphql": true, ".gql": true,
+		".sh": true, ".bash": true, ".zsh": true, ".fish": true,
+		".dart": true, ".lua": true, ".r": true, ".R": true, ".jl": true,
+		".ex": true, ".exs": true, ".erl": true, ".hrl": true,
+		".ml": true, ".mli": true, ".hs": true, ".lhs": true,
+		".clj": true, ".cljs": true, ".cljc": true,
+		".elm": true, ".purs": true, ".nix": true,
+		".zig": true, ".nim": true, ".cr": true, ".d": true,
+		".asm": true, ".s": true, ".S": true,
+		".pl": true, ".pm": true,
+		".proto": true, ".thrift": true, ".avsc": true,
+		".tf": true, ".hcl": true,
+	}
+
 	// Patterns for lines to redact from error output.
 	secretLinePattern = regexp.MustCompile(`(?i)(token|key|secret|password|credential)`)
 	absPathPattern    = regexp.MustCompile(`/Users/[^\s]+`)
@@ -493,12 +517,25 @@ func filterSafeFiles(porcelain string) []string {
 }
 
 // isDangerousFile checks if a file matches any dangerous pattern.
+// Source code files with known extensions are not filtered by
+// credential/secret/token patterns to avoid false positives.
 func isDangerousFile(file string) bool {
 	base := filepath.Base(file)
+	ext := filepath.Ext(file)
+	isSourceCode := sourceCodeExtensions[ext]
+
 	for _, pattern := range dangerousFilePatterns {
 		if strings.HasSuffix(pattern, "/") && strings.HasPrefix(file, pattern) {
 			return true
 		}
+
+		// Skip credential/secret/token patterns for source code files.
+		// These patterns are meant for actual secret files (.env, .pem, etc.),
+		// not source code that implements token/secret/credential functionality.
+		if isSourceCode && (strings.Contains(pattern, "credential") || strings.Contains(pattern, "secret") || strings.Contains(pattern, "token")) {
+			continue
+		}
+
 		if matched, _ := filepath.Match(pattern, base); matched {
 			return true
 		}

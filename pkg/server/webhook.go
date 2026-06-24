@@ -673,6 +673,16 @@ func (s *Server) handleApprove(repo, repoDir string, num int, p webhookPayload, 
 
 	if polish {
 		s.runPolish(repo, num, worktreeDir, noopUpdate, bot)
+		// Re-read git status after polish phase may have created/modified files.
+		status, err = runCmd(worktreeDir, gitTimeout, "git", "status", "--porcelain")
+		if err != nil {
+			s.postIssueComment(repo, repoDir, num, formatError("Failed to get git status after polish", err), token)
+			return
+		}
+		if strings.TrimSpace(status) == "" {
+			s.postIssueComment(repo, repoDir, num, "No changes remained after polish phase. Nothing to commit.", token)
+			return
+		}
 	}
 
 	title := p.Issue.Title
