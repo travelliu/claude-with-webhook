@@ -293,24 +293,34 @@ func (s *Server) extractBotCommand(body string) (string, *BotConfig) {
 	return "", nil
 }
 
-// matchBot finds the bot whose prefix matches the comment body.
-// Only matches on explicit @mention prefix. No @mention = no match.
-// Returns the matched bot config and the parsed action, or ("", nil) if no match.
-func (s *Server) matchBot(repo, sender, body string) (string, *BotConfig) {
-	trimmed := strings.TrimSpace(body)
-	firstLine := strings.ToLower(strings.SplitN(trimmed, "\n", 2)[0])
-	firstLine = strings.TrimSpace(firstLine)
+// matchBot finds the bot whose prefix matches anywhere in the comment body.
+// Searches the entire body text for an @mention prefix (e.g. "@claude").
+// Returns the parsed action, the command text after the prefix, and the matched bot config,
+// or ("", "", nil) if no match.
+func (s *Server) matchBot(repo, sender, body string) (string, string, *BotConfig) {
+	lower := strings.ToLower(body)
 
 	for i := range s.bots {
 		bot := &s.bots[i]
 		prefix := strings.ToLower(bot.Prefix)
-		if strings.HasPrefix(firstLine, prefix) {
-			s.log.Info("bot matched by @mention prefix", "repo", repo, "bot", bot.Name, "prefix", bot.Prefix, "sender", sender)
-			return "", bot
+		idx := strings.Index(lower, prefix)
+		if idx == -1 {
+			continue
 		}
+		afterPrefix := strings.TrimSpace(body[idx+len(prefix):])
+		firstLine, _, _ := strings.Cut(afterPrefix, "\n")
+		firstLineLower := strings.TrimSpace(strings.ToLower(firstLine))
+		cmdWord, _, _ := strings.Cut(firstLineLower, " ")
+		action := classifyCommand(strings.TrimSpace(cmdWord))
+		if action == "skip-bare-mention" {
+			s.log.Info("bot matched but bare mention, skipping", "repo", repo, "bot", bot.Name, "prefix", bot.Prefix, "sender", sender)
+			return action, "", bot
+		}
+		s.log.Info("bot matched by @mention prefix", "repo", repo, "bot", bot.Name, "prefix", bot.Prefix, "sender", sender)
+		return action, afterPrefix, bot
 	}
 
-	return "skip-no-prefix", nil
+	return "skip-no-prefix", "", nil
 }
 
 // classifyComment determines what action to take on a comment.
@@ -331,17 +341,19 @@ func (s *Server) classifyComment(repo, sender, senderType, body string) string {
 		return "skip-user"
 	}
 
-	trimmed := strings.TrimSpace(body)
-	firstLine := strings.ToLower(strings.SplitN(trimmed, "\n", 2)[0])
-	firstLine = strings.TrimSpace(firstLine)
+	lower := strings.ToLower(body)
 
-	// Check against all bot prefixes
+	// Check against all bot prefixes anywhere in the body
 	for _, bot := range s.bots {
 		prefix := strings.ToLower(bot.Prefix)
-		if strings.HasPrefix(firstLine, prefix) {
-			cmd := strings.TrimSpace(strings.TrimPrefix(firstLine, prefix))
-			return classifyCommand(cmd)
+		idx := strings.Index(lower, prefix)
+		if idx == -1 {
+			continue
 		}
+		rest := strings.TrimSpace(lower[idx+len(prefix):])
+		firstLine, _, _ := strings.Cut(rest, "\n")
+		cmdWord, _, _ := strings.Cut(strings.TrimSpace(firstLine), " ")
+		return classifyCommand(strings.TrimSpace(cmdWord))
 	}
 
 	return "skip-no-prefix"
@@ -374,9 +386,14 @@ func (s *Server) handleIssueComment(repo, repoDir string, num int, p webhookPayl
 	}
 
 	// Find which bot this comment is addressed to
-	action, bot := s.matchBot(repo, sender, p.Comment.Body)
+	action, cmd, bot := s.matchBot(repo, sender, p.Comment.Body)
 	if bot == nil {
 		s.log.Info("no bot matched, ignoring comment", "repo", repo, "issue", num, "user", sender, "body", truncateLog(p.Comment.Body, 2))
+		return
+	}
+
+	if action == "skip-bare-mention" {
+		s.log.Debug("ignoring bare mention", "repo", repo, "issue", num, "prefix", bot.Prefix)
 		return
 	}
 
@@ -395,18 +412,7 @@ func (s *Server) handleIssueComment(repo, repoDir string, num int, p webhookPayl
 	}
 
 	s.log.Info("user authorized, processing comment", "repo", repo, "issue", num, "user", sender, "bot", bot.Name)
-
-	// Parse the command action
 	body := strings.TrimSpace(p.Comment.Body)
-	prefix := strings.ToLower(bot.Prefix)
-	firstLine := strings.ToLower(strings.SplitN(body, "\n", 2)[0])
-	cmd := strings.TrimSpace(strings.TrimPrefix(firstLine, prefix))
-	action = classifyCommand(cmd)
-
-	if action == "skip-bare-mention" {
-		s.log.Debug("ignoring bare mention", "repo", repo, "issue", num, "prefix", bot.Prefix)
-		return
-	}
 
 	s.log.Info("comment routed", "repo", repo, "issue", num, "bot", bot.Name, "action", action)
 
