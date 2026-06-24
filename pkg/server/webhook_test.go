@@ -366,6 +366,30 @@ func TestClassifyComment(t *testing.T) {
 			body:       "this is a regular comment",
 			expected:   "skip-no-prefix",
 		},
+		{
+			name:       "@mention at end of body",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "## Code Review\n\nSome review content here.\n\n@claude please take a look",
+			expected:   "followup",
+		},
+		{
+			name:       "@mention in middle of body",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "Here is my review.\n\n@claude plan this refactoring\n\nMore details below.",
+			expected:   "plan",
+		},
+		{
+			name:       "@mention approve at end",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "Looks good to me.\n\n@claude approve",
+			expected:   "approve",
+		},
 	}
 
 	for _, tt := range tests {
