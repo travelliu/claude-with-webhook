@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -28,6 +29,10 @@ type webhookPayload struct {
 			URL string `json:"url"`
 		} `json:"pull_request"`
 	} `json:"issue"`
+	PullRequest *struct {
+		Number int  `json:"number"`
+		Merged bool `json:"merged"`
+	} `json:"pull_request"`
 	Comment struct {
 		ID   int    `json:"id"`
 		Body string `json:"body"`
@@ -116,7 +121,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request, repoFromU
 	}
 
 	event := r.Header.Get("X-GitHub-Event")
-	if event != "issues" && event != "issue_comment" {
+	if event != "issues" && event != "issue_comment" && event != "pull_request" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -145,6 +150,9 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request, repoFromU
 
 	go func() {
 		num := payload.Issue.Number
+		if event == "pull_request" && payload.PullRequest != nil {
+			num = payload.PullRequest.Number
+		}
 		lockKey := fmt.Sprintf("%s#%d", repo, num)
 
 		mu, _ := s.issueMu.LoadOrStore(lockKey, &sync.Mutex{})
@@ -162,6 +170,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request, repoFromU
 		case "issue_comment":
 			if payload.Action == "created" {
 				s.handleIssueComment(repo, repoDir, num, payload)
+			}
+		case "pull_request":
+			if payload.Action == "closed" {
+				s.handlePRClosed(repo, repoDir, num, payload)
 			}
 		}
 	}()
@@ -1001,4 +1013,23 @@ func (s *Server) handlePRComment(repo, repoDir string, num int, p webhookPayload
 
 	s.postIssueComment(repo, repoDir, num, fmt.Sprintf("Changes pushed to `%s`.", branch), token)
 	s.log.Info("pushed PR changes", "repo", repo, "issue", num, "branch", branch)
+}
+
+// handlePRClosed cleans up the worktree when a PR is closed without merging.
+func (s *Server) handlePRClosed(repo, repoDir string, num int, p webhookPayload) {
+	if p.PullRequest == nil || p.PullRequest.Merged {
+		return
+	}
+
+	branch := fmt.Sprintf("issue-%d", num)
+	worktreeDir := filepath.Join(repoDir, "worktrees", branch)
+
+	if _, err := os.Stat(worktreeDir); os.IsNotExist(err) {
+		s.log.Debug("no worktree to clean up for closed PR", "repo", repo, "pr", num)
+		return
+	}
+
+	s.log.Info("cleaning up worktree for closed PR", "repo", repo, "pr", num, "dir", worktreeDir)
+	cleanupWorktree(repoDir, worktreeDir, branch)
+	s.log.Info("worktree cleaned up for closed PR", "repo", repo, "pr", num)
 }
