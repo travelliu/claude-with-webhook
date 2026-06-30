@@ -22,6 +22,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// tunnelWatchInterval is how often we poll the tunnel URL for changes.
+const tunnelWatchInterval = 30 * time.Second
+
 // Server represents the webhook server
 type Server struct {
 	config          *Config
@@ -35,6 +38,7 @@ type Server struct {
 	deliveryCache   sync.Map // X-GitHub-Delivery UUID -> time.Time (dedup)
 	issueMu         sync.Map // per-issue mutex keyed by "repo#number"
 	log             *slog.Logger
+	tunnelCancel    context.CancelFunc // cancels the tunnel URL monitor goroutine
 }
 
 // Config holds server configuration
@@ -144,6 +148,9 @@ func (s *Server) Start() error {
 		s.log.Warn("webhook check failed", "error", err)
 	}
 
+	// Start monitoring tunnel URL for changes (only when using a tunnel)
+	s.startTunnelMonitor()
+
 	// Start server
 	go func() {
 		s.log.Info("server listening", "addr", s.httpServer.Addr)
@@ -174,6 +181,27 @@ func (s *Server) ensureTunnel() error {
 	}
 	s.log.Info("tunnel URL", "url", url)
 	return nil
+}
+
+// startTunnelMonitor starts a goroutine that watches for tunnel URL changes
+// and updates GitHub webhooks accordingly. It is a no-op when PublicURL is set.
+func (s *Server) startTunnelMonitor() {
+	if s.config.PublicURL != "" {
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.tunnelCancel = cancel
+
+	urlCh := s.tunnelManager.WatchURL(ctx, tunnelWatchInterval)
+	go func() {
+		for newURL := range urlCh {
+			s.log.Info("tunnel URL changed, updating webhooks", "new_url", newURL)
+			if err := s.checkAndUpdateWebhooks(); err != nil {
+				s.log.Warn("webhook update after tunnel URL change failed", "error", err)
+			}
+		}
+	}()
 }
 
 // checkAndUpdateWebhooks checks and updates webhooks if tunnel URL changed
@@ -278,6 +306,11 @@ func (s *Server) waitForShutdown() {
 
 	sig := <-shutdown
 	s.log.Info("received signal, shutting down", "signal", sig)
+
+	// Stop tunnel monitor
+	if s.tunnelCancel != nil {
+		s.tunnelCancel()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

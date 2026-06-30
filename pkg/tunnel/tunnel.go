@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -24,7 +25,8 @@ const (
 type Manager struct {
 	baseDir    string
 	port       string
-	tunnelPort string // port ngrok/tailscale forwards to (defaults to port)
+	tunnelPort string                  // port ngrok/tailscale forwards to (defaults to port)
+	getURLFunc func() (string, error) // overridable for testing
 }
 
 // NewManager creates a new tunnel manager
@@ -93,6 +95,14 @@ func (m *Manager) detectType() (Type, error) {
 	}
 }
 
+// getURL returns the current tunnel URL, using the injectable function if set.
+func (m *Manager) getURL() (string, error) {
+	if m.getURLFunc != nil {
+		return m.getURLFunc()
+	}
+	return m.GetURL()
+}
+
 // GetURL returns the current tunnel URL
 func (m *Manager) GetURL() (string, error) {
 	tunnelType, err := m.detectType()
@@ -110,6 +120,48 @@ func (m *Manager) GetURL() (string, error) {
 	default:
 		return "", fmt.Errorf("unknown tunnel type: %s", tunnelType)
 	}
+}
+
+// WatchURL monitors the tunnel URL for changes. It polls GetURL at the given
+// interval and sends the new URL on the returned channel whenever the URL
+// differs from the previous value. The channel is closed when ctx is canceled.
+func (m *Manager) WatchURL(ctx context.Context, interval time.Duration) <-chan string {
+	ch := make(chan string, 1)
+	go func() {
+		defer close(ch)
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		// Capture the initial URL so we only report actual changes.
+		var lastURL string
+		if url, err := m.getURL(); err == nil {
+			lastURL = url
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				url, err := m.getURL()
+				if err != nil {
+					slog.Warn("tunnel URL check failed", "error", err)
+					continue
+				}
+				if url != lastURL {
+					slog.Info("tunnel URL changed", "old", lastURL, "new", url)
+					lastURL = url
+					// Non-blocking send: drop if the consumer is still busy.
+					select {
+					case ch <- url:
+					default:
+					}
+				}
+			}
+		}
+	}()
+	return ch
 }
 
 // ensureTailscale ensures Tailscale Funnel is running
