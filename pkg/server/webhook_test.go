@@ -390,6 +390,30 @@ func TestClassifyComment(t *testing.T) {
 			body:       "Looks good to me.\n\n@claude approve",
 			expected:   "approve",
 		},
+		{
+			name:       "case-insensitive prefix - @Claude plan",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@Claude plan",
+			expected:   "plan",
+		},
+		{
+			name:       "case-insensitive prefix - @CLAUDE approve",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@CLAUDE approve",
+			expected:   "approve",
+		},
+		{
+			name:       "case-insensitive prefix - @cLaUdE followup",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@cLaUdE implement user login",
+			expected:   "followup",
+		},
 	}
 
 	for _, tt := range tests {
