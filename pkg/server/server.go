@@ -376,6 +376,11 @@ func loadRepos(baseDir string) map[string]RepoConfig {
 		if err := yaml.Unmarshal(data, &rf); err == nil && len(rf.Repos) > 0 {
 			return rf.Repos
 		}
+		// Try again after stripping trailing commas
+		sanitized := sanitizeJSON(data)
+		if err := yaml.Unmarshal(sanitized, &rf); err == nil && len(rf.Repos) > 0 {
+			return rf.Repos
+		}
 	}
 
 	// Fallback to repos.conf (legacy flat format)
