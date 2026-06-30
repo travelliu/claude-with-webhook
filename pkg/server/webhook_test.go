@@ -694,6 +694,41 @@ func TestPRDetection(t *testing.T) {
 	})
 }
 
+func TestIssueStateDetection(t *testing.T) {
+	t.Run("open_issue_state", func(t *testing.T) {
+		payload := `{"action":"created","issue":{"number":1,"title":"test","body":"","state":"open","user":{"login":"alice"}},"comment":{"id":1,"body":"@claude approve","user":{"login":"alice"}},"sender":{"login":"alice","type":"User"},"repository":{"full_name":"owner/repo"}}`
+		var p webhookPayload
+		if err := json.Unmarshal([]byte(payload), &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p.Issue.State != "open" {
+			t.Errorf("expected state 'open', got %q", p.Issue.State)
+		}
+	})
+
+	t.Run("closed_issue_state", func(t *testing.T) {
+		payload := `{"action":"created","issue":{"number":1,"title":"test","body":"","state":"closed","user":{"login":"alice"}},"comment":{"id":1,"body":"@claude approve","user":{"login":"alice"}},"sender":{"login":"alice","type":"User"},"repository":{"full_name":"owner/repo"}}`
+		var p webhookPayload
+		if err := json.Unmarshal([]byte(payload), &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p.Issue.State != "closed" {
+			t.Errorf("expected state 'closed', got %q", p.Issue.State)
+		}
+	})
+
+	t.Run("empty_state_defaults_to_empty", func(t *testing.T) {
+		payload := `{"action":"created","issue":{"number":1,"title":"test","body":"","user":{"login":"alice"}},"comment":{"id":1,"body":"@claude approve","user":{"login":"alice"}},"sender":{"login":"alice","type":"User"},"repository":{"full_name":"owner/repo"}}`
+		var p webhookPayload
+		if err := json.Unmarshal([]byte(payload), &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p.Issue.State != "" {
+			t.Errorf("expected empty state, got %q", p.Issue.State)
+		}
+	})
+}
+
 func TestTruncateLog(t *testing.T) {
 	tests := []struct {
 		name     string

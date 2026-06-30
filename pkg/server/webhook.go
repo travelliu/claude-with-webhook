@@ -21,6 +21,7 @@ type webhookPayload struct {
 		Number int    `json:"number"`
 		Title  string `json:"title"`
 		Body   string `json:"body"`
+		State  string `json:"state"`
 		User   struct {
 			Login string `json:"login"`
 		} `json:"user"`
@@ -382,6 +383,17 @@ func (s *Server) handleIssueComment(repo, repoDir string, num int, p webhookPayl
 
 	if p.Sender.Type == "Bot" {
 		s.log.Debug("skipping bot-type sender", "repo", repo, "issue", num, "user", sender)
+		return
+	}
+
+	// Check if issue is closed - skip processing closed issues
+	if p.Issue.State == "closed" {
+		s.log.Info("ignoring comment on closed issue", "repo", repo, "issue", num, "user", sender)
+		// Find which bot to use for the reply
+		_, _, bot := s.matchBot(repo, sender, p.Comment.Body)
+		if bot != nil {
+			s.postIssueComment(repo, repoDir, num, "This issue is closed. Reopen it to continue.", s.botToken(bot))
+		}
 		return
 	}
 
