@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -389,6 +391,30 @@ func TestClassifyComment(t *testing.T) {
 			senderType: "User",
 			body:       "Looks good to me.\n\n@claude approve",
 			expected:   "approve",
+		},
+		{
+			name:       "case-insensitive prefix - @Claude plan",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@Claude plan",
+			expected:   "plan",
+		},
+		{
+			name:       "case-insensitive prefix - @CLAUDE approve",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@CLAUDE approve",
+			expected:   "approve",
+		},
+		{
+			name:       "case-insensitive prefix - @cLaUdE followup",
+			cfg:        baseCfg,
+			sender:     "alice",
+			senderType: "User",
+			body:       "@cLaUdE implement user login",
+			expected:   "followup",
 		},
 	}
 
@@ -911,4 +937,94 @@ func TestEmptyCommentSkipped(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandlePRClosed(t *testing.T) {
+	t.Run("merged PR does not clean up worktree", func(t *testing.T) {
+		dir := t.TempDir()
+		srv := &Server{
+			config: &Config{},
+			log:    pkglog.New("test"),
+		}
+		payload := webhookPayload{
+			Action: "closed",
+		}
+		pr := struct {
+			Number int  `json:"number"`
+			Merged bool `json:"merged"`
+		}{Number: 42, Merged: true}
+		payload.PullRequest = &pr
+
+		srv.handlePRClosed("owner/repo", dir, 42, payload)
+		// No worktree cleanup expected for merged PRs.
+	})
+
+	t.Run("closed PR without worktree is no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		srv := &Server{
+			config: &Config{},
+			log:    pkglog.New("test"),
+		}
+		payload := webhookPayload{
+			Action: "closed",
+		}
+		pr := struct {
+			Number int  `json:"number"`
+			Merged bool `json:"merged"`
+		}{Number: 99, Merged: false}
+		payload.PullRequest = &pr
+
+		srv.handlePRClosed("owner/repo", dir, 99, payload)
+		// No worktree exists, should not panic.
+	})
+
+	t.Run("closed PR cleans up worktree", func(t *testing.T) {
+		dir := t.TempDir()
+		// Initialize a real git repo so worktree commands work.
+		runCmd(dir, gitTimeout, "git", "init")
+		runCmd(dir, gitTimeout, "git", "config", "user.email", "test@test.com")
+		runCmd(dir, gitTimeout, "git", "config", "user.name", "Test")
+		runCmd(dir, gitTimeout, "git", "commit", "--allow-empty", "-m", "init")
+
+		branch := "issue-42"
+		worktreeDir := filepath.Join(dir, "worktrees", branch)
+		runCmd(dir, gitTimeout, "git", "worktree", "add", worktreeDir, "-b", branch, "HEAD")
+
+		if _, err := os.Stat(worktreeDir); os.IsNotExist(err) {
+			t.Fatal("worktree directory should exist before cleanup")
+		}
+
+		srv := &Server{
+			config: &Config{},
+			log:    pkglog.New("test"),
+		}
+		payload := webhookPayload{
+			Action: "closed",
+		}
+		pr := struct {
+			Number int  `json:"number"`
+			Merged bool `json:"merged"`
+		}{Number: 42, Merged: false}
+		payload.PullRequest = &pr
+
+		srv.handlePRClosed("owner/repo", dir, 42, payload)
+		if _, err := os.Stat(worktreeDir); !os.IsNotExist(err) {
+			t.Error("worktree directory should have been removed")
+		}
+	})
+
+	t.Run("nil PullRequest is no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		srv := &Server{
+			config: &Config{},
+			log:    pkglog.New("test"),
+		}
+		payload := webhookPayload{
+			Action: "closed",
+		}
+		// PullRequest is nil.
+
+		srv.handlePRClosed("owner/repo", dir, 1, payload)
+		// Should not panic.
+	})
 }
