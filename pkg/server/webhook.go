@@ -385,6 +385,11 @@ func (s *Server) handleIssueComment(repo, repoDir string, num int, p webhookPayl
 		return
 	}
 
+	if strings.TrimSpace(p.Comment.Body) == "" {
+		s.log.Debug("skipping empty or whitespace-only comment", "repo", repo, "issue", num, "user", sender)
+		return
+	}
+
 	// Find which bot this comment is addressed to
 	action, cmd, bot := s.matchBot(repo, sender, p.Comment.Body)
 	if bot == nil {
