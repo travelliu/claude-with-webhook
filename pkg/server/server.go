@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -367,13 +368,28 @@ type reposFileYAML struct {
 	Repos map[string]RepoConfig `yaml:"repos"`
 }
 
-// loadRepos loads repo config from repos.yaml, falling back to repos.conf.
+// reposFileJSON is the top-level structure of repos.json.
+type reposFileJSON struct {
+	Repos map[string]RepoConfig `json:"repos"`
+}
+
+// loadRepos loads repo config from repos.yaml, then repos.json, falling back to repos.conf.
 func loadRepos(baseDir string) map[string]RepoConfig {
 	// Try repos.yaml first
 	yamlPath := filepath.Join(baseDir, "repos.yaml")
 	if data, err := os.ReadFile(yamlPath); err == nil {
 		var rf reposFileYAML
 		if err := yaml.Unmarshal(data, &rf); err == nil && len(rf.Repos) > 0 {
+			return rf.Repos
+		}
+	}
+
+	// Try repos.json with lenient trailing-comma handling
+	jsonPath := filepath.Join(baseDir, "repos.json")
+	if data, err := os.ReadFile(jsonPath); err == nil {
+		cleaned := cleanJSON(data)
+		var rf reposFileJSON
+		if err := json.Unmarshal(cleaned, &rf); err == nil && len(rf.Repos) > 0 {
 			return rf.Repos
 		}
 	}
