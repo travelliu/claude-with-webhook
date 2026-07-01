@@ -880,6 +880,65 @@ func TestPolishFlagExtraction(t *testing.T) {
 	}
 }
 
+func TestEmptyCommentSkipped(t *testing.T) {
+	cfg := &Config{
+		AllowedUsers:  map[string]bool{"alice": true},
+		BotUsername:   "my-bot",
+		CommandPrefix: "@claude",
+		repos:         map[string]RepoConfig{"owner/repo": {Dir: "/tmp/repo"}},
+		WebhookSecret: "test-secret",
+	}
+	srv := &Server{
+		config:    cfg,
+		log:       pkglog.New("test"),
+		semaphore: make(chan struct{}, 3),
+		bots:      []BotConfig{{Name: "claude", Username: "my-bot", Prefix: "@claude"}},
+	}
+
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "empty body",
+			body:       `{"action":"created","issue":{"number":1,"title":"test","body":"","user":{"login":"alice"}},"comment":{"id":1,"body":"","user":{"login":"alice"}},"sender":{"login":"alice","type":"User"},"repository":{"full_name":"owner/repo"}}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "whitespace-only body",
+			body:       `{"action":"created","issue":{"number":1,"title":"test","body":"","user":{"login":"alice"}},"comment":{"id":1,"body":"   ","user":{"login":"alice"}},"sender":{"login":"alice","type":"User"},"repository":{"full_name":"owner/repo"}}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "tab and newline body",
+			body:       `{"action":"created","issue":{"number":1,"title":"test","body":"","user":{"login":"alice"}},"comment":{"id":1,"body":"\t\n ","user":{"login":"alice"}},"sender":{"login":"alice","type":"User"},"repository":{"full_name":"owner/repo"}}`,
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	sign := func(payload string) string {
+		mac := hmac.New(sha256.New, []byte("test-secret"))
+		mac.Write([]byte(payload))
+		return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/owner/repo/webhook", strings.NewReader(tt.body))
+			req.Header.Set("X-GitHub-Event", "issue_comment")
+			req.Header.Set("X-Hub-Signature-256", sign(tt.body))
+
+			rr := httptest.NewRecorder()
+			srv.handleWebhook(rr, req, "owner/repo")
+
+			if rr.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rr.Code, tt.wantStatus)
+			}
+		})
+	}
+}
+
 func TestHandlePRClosed(t *testing.T) {
 	t.Run("merged PR does not clean up worktree", func(t *testing.T) {
 		dir := t.TempDir()
